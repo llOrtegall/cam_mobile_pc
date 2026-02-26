@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
-import androidx.camera.view.PreviewView
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,11 +23,6 @@ class CameraStreamingService : Service() {
 
         const val ACTION_START = "com.campc.ACTION_START"
         const val ACTION_STOP = "com.campc.ACTION_STOP"
-        const val EXTRA_PREVIEW_VIEW = "preview_view"
-
-        // Shared preview view set by MainActivity before starting the service
-        @Volatile
-        var sharedPreviewView: PreviewView? = null
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -51,13 +45,6 @@ class CameraStreamingService : Service() {
     }
 
     private fun startStreaming() {
-        val previewView = sharedPreviewView
-        if (previewView == null) {
-            Log.e(TAG, "No PreviewView provided, cannot start streaming")
-            stopSelf()
-            return
-        }
-
         startForeground(NOTIFICATION_ID, buildNotification("Waiting for connection…"))
 
         val server = TcpServer(
@@ -74,7 +61,7 @@ class CameraStreamingService : Service() {
         tcpServer = server
         server.start(serviceScope)
 
-        val streamer = CameraStreamer(server, previewView)
+        val streamer = CameraStreamer(server)
         cameraStreamer = streamer
         streamer.start(ProcessLifecycleOwner.get(), applicationContext)
 
@@ -98,7 +85,6 @@ class CameraStreamingService : Service() {
         super.onDestroy()
         cleanup()
         serviceScope.cancel()
-        sharedPreviewView = null
     }
 
     private fun buildNotification(contentText: String): Notification {

@@ -3,14 +3,12 @@ package com.campc
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.widget.Button
-import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.campc.databinding.ActivityMainBinding
 
@@ -64,9 +62,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startStreamingService() {
-        // Pass the PreviewView to the service via the companion object
-        CameraStreamingService.sharedPreviewView = binding.previewView
-
         val intent = Intent(this, CameraStreamingService::class.java).apply {
             action = CameraStreamingService.ACTION_START
         }
@@ -82,10 +77,16 @@ class MainActivity : AppCompatActivity() {
         updateUi(false)
     }
 
+    @SuppressLint("SetTextI18n")
     private fun updateUi(streaming: Boolean) {
         isStreaming = streaming
         binding.toggleButton.text = if (streaming) "Stop Streaming" else "Start Streaming"
-        binding.statusText.text = if (streaming) "Streaming on :5000 — connect via ADB" else "Ready"
+        binding.statusText.text = if (streaming) "Streaming · TCP :5000" else "Ready"
+        val dotColor = if (streaming)
+            ContextCompat.getColor(this, R.color.status_streaming)
+        else
+            ContextCompat.getColor(this, R.color.status_idle)
+        binding.statusDot.backgroundTintList = ColorStateList.valueOf(dotColor)
     }
 
     private fun hasCameraPermission() =
@@ -94,6 +95,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Don't stop the service here — it runs in the background as a foreground service
+        // Service runs independently as a foreground service
     }
 }

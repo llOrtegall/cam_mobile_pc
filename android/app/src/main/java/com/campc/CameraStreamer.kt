@@ -5,11 +5,10 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.util.Log
 import android.util.Size
+import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -18,7 +17,6 @@ import java.util.concurrent.Executors
 
 class CameraStreamer(
     private val tcpServer: TcpServer,
-    private val previewView: PreviewView,
 ) {
     companion object {
         private const val TAG = "CameraStreamer"
@@ -40,11 +38,6 @@ class CameraStreamer(
     private fun bindCamera(lifecycleOwner: LifecycleOwner) {
         val provider = cameraProvider ?: return
 
-        val preview = Preview.Builder()
-            .setTargetResolution(TARGET_RESOLUTION)
-            .build()
-            .also { it.surfaceProvider = previewView.surfaceProvider }
-
         val imageAnalysis = ImageAnalysis.Builder()
             .setTargetResolution(TARGET_RESOLUTION)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -60,11 +53,9 @@ class CameraStreamer(
             }
         }
 
-        val cameraSelector = androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA
-
         try {
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, imageAnalysis)
             Log.i(TAG, "Camera bound successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Camera binding failed: ${e.message}")
