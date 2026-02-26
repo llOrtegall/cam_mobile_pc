@@ -11,7 +11,7 @@ DEVICE_NR=10
 CARD_LABEL="AndroidCam"
 
 echo "==> Installing ADB and v4l2-utils..."
-sudo dnf install -y android-tools v4l-utils ffmpeg
+sudo dnf install -y android-tools v4l-utils ffmpeg --allowerasing
 
 # ---- v4l2loopback via RPM Fusion (preferred) --------------------------------
 install_via_rpmfusion() {
