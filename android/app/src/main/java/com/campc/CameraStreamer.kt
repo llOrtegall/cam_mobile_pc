@@ -76,27 +76,56 @@ class CameraStreamer(
         val uBuffer: ByteBuffer = uPlane.buffer
         val vBuffer: ByteBuffer = vPlane.buffer
 
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
+        val yRowStride = yPlane.rowStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
 
-        // Build NV21: Y plane followed by interleaved VU
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
+        val ySize = width * height
+        val chromaSize = ySize / 2
+        val nv21 = ByteArray(ySize + chromaSize)
 
-        // Fast path: semi-planar layout (pixelStride == 2 means VU already interleaved)
-        if (vPlane.pixelStride == 2) {
-            vBuffer.get(nv21, ySize, vSize)
-        } else {
-            // Slow path: manually interleave V and U bytes
-            val vBytes = ByteArray(vSize)
-            val uBytes = ByteArray(uSize)
-            vBuffer.get(vBytes)
-            uBuffer.get(uBytes)
-            var idx = ySize
-            for (i in 0 until minOf(vSize, uSize)) {
-                nv21[idx++] = vBytes[i]
-                nv21[idx++] = uBytes[i]
+        // Copy Y plane respecting row stride
+        val yRow = ByteArray(yRowStride)
+        var outputPos = 0
+        yBuffer.rewind()
+        for (row in 0 until height) {
+            val toCopy = minOf(yRowStride, yBuffer.remaining())
+            yBuffer.get(yRow, 0, toCopy)
+            System.arraycopy(yRow, 0, nv21, outputPos, width)
+            outputPos += width
+        }
+
+        // Copy interleaved VU (NV21) from U/V planes taking pixelStride into account
+        val uRow = ByteArray(uvRowStride)
+        val vRow = ByteArray(uvRowStride)
+        val halfHeight = height / 2
+        var chromaPos = ySize
+
+        for (row in 0 until halfHeight) {
+            val uvRowStart = row * uvRowStride
+
+            // read full row from each plane
+            uBuffer.position(uvRowStart)
+            val uAvailable = minOf(uvRowStride, uBuffer.remaining())
+            uBuffer.get(uRow, 0, uAvailable)
+
+            vBuffer.position(uvRowStart)
+            val vAvailable = minOf(uvRowStride, vBuffer.remaining())
+            vBuffer.get(vRow, 0, vAvailable)
+
+            var col = 0
+            var j = 0
+            while (col < width) {
+                val uIndex = j * uvPixelStride
+                val vIndex = j * vPlane.pixelStride
+                val uByte = if (uIndex < uAvailable) uRow[uIndex] else 0
+                val vByte = if (vIndex < vAvailable) vRow[vIndex] else 0
+
+                nv21[chromaPos++] = vByte
+                nv21[chromaPos++] = uByte
+
+                col += 2
+                j++
             }
         }
 
