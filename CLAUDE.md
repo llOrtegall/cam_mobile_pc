@@ -8,8 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 Android CameraX (YUV_420_888) → NV21 → JPEG (quality 75) → MJPEG over TCP :5000
-  → ADB forward (USB) → ffmpeg → /dev/video10 (v4l2loopback "AndroidCam")
+  → ADB forward (USB) → campc.py (OpenCV + pyfakewebcam) → /dev/video10 (v4l2loopback "AndroidCam")
 ```
+
+The Linux side is a **Python/Tkinter GUI app** (`campc.py`) — no ffmpeg required for normal use.
+Target platform: **Ubuntu** (uses `v4l2loopback-dkms` via apt, not akmod/RPM Fusion).
 
 ## Commands
 
@@ -27,16 +30,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ./gradlew installDebug
 ```
 
-### Linux PC
+### Linux PC (Ubuntu)
 
 ```bash
-# One-time setup (installs adb, ffmpeg, akmod-v4l2loopback; creates /dev/video10)
-cd linux
-bash setup.sh
+# One-time setup (installs adb, v4l2loopback-dkms, Python deps; creates /dev/video10)
+bash linux/setup_ubuntu.sh
 
-# Daily use: forward ADB port and start ffmpeg loop
-cd linux
-bash start.sh
+# Daily use: launch the GUI app (handles ADB forward internally)
+python3 linux/campc.py
 ```
 
 ### Verification
@@ -64,14 +65,26 @@ The project has two independent components:
 
 ### Linux (`linux/`)
 
-- **`setup.sh`** — Run once per machine/kernel upgrade. Installs `android-tools`, `ffmpeg`, `akmod-v4l2loopback` (via RPM Fusion, with source build as fallback). Loads the module with `exclusive_caps=1` and persists it via `/etc/modules-load.d/` and `/etc/modprobe.d/`.
+- **`setup_ubuntu.sh`** — Run once per machine (Ubuntu only). Installs `android-tools-adb`, `v4l2loopback-dkms`, `v4l-utils`, and Python packages (`opencv-python`, `pyfakewebcam`, `Pillow`). Loads the module with `exclusive_caps=1` and persists via `/etc/modules-load.d/` and `/etc/modprobe.d/`.
 
-- **`start.sh`** — Run daily. Waits for ADB device, establishes `adb forward tcp:5000 tcp:5000`, then runs ffmpeg in a loop. ffmpeg reads `-f mpjpeg` from `tcp://localhost:5000`, scales/converts to `yuyv422`, and writes to `/dev/video10`. Auto-restarts on disconnection.
+- **`campc.py`** — Main GUI app (Python/Tkinter). Threading model: Tkinter event loop on main thread + capture thread. The capture thread calls `adb forward`, opens `cv2.VideoCapture("tcp://localhost:5000", CAP_FFMPEG)`, and per frame: applies zoom (centre-crop + resize), rotation (`cv2.rotate`), resizes to output resolution, writes to `/dev/video10` via `pyfakewebcam.FakeWebcam`, and pushes a 640×360 thumbnail to the Tkinter canvas via `root.after()`. On disconnect, retries every 2 s automatically. Cleans up `adb forward --remove` on exit via `atexit`.
+
+  Controls exposed in the UI:
+  | Control | Variable | Range |
+  |---|---|---|
+  | Zoom slider | `zoom_var` DoubleVar | 1.0 – 4.0× |
+  | FPS slider | `fps_var` IntVar | 5 – 30 |
+  | Rotation radio | `rotation_var` IntVar | 0 / 90 / 180 / 270° |
+  | Output resolution radio | `resolution_var` StringVar | 720p / 1080p / 480p |
+
+- **`setup.sh`** / **`start.sh`** — Legacy Fedora/ffmpeg scripts (kept for reference, not the primary workflow).
 
 ## Key implementation notes
 
 - `exclusive_caps=1` on v4l2loopback is critical — without it, Zoom/Meet/Teams won't recognize the device as a real capture camera.
 - `CameraStreamingService` uses `ProcessLifecycleOwner.get()` (not the Activity's lifecycle) so the camera stays open when the user navigates away from the app.
 - `TcpServer` accepts only one concurrent client; if a second PC connects, the first is closed first.
-- The `start.sh` loop handles reconnection entirely on the Linux side — no reconnect logic is needed in the Android app.
-- After a kernel upgrade, `setup.sh` must be re-run to rebuild the `akmod-v4l2loopback` module.
+- `campc.py` handles reconnection automatically in the capture thread — no reconnect logic is needed in the Android app.
+- `pyfakewebcam.FakeWebcam` is recreated whenever the output resolution changes (it must be constructed with fixed dimensions).
+- After a kernel upgrade, `setup_ubuntu.sh` must be re-run so DKMS rebuilds the `v4l2loopback` module for the new kernel.
+- All UI updates from the capture thread use `root.after(0, ...)` — never call Tkinter widgets directly from a background thread.
