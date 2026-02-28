@@ -1,0 +1,344 @@
+mod adb;
+mod config;
+mod engine;
+mod ffmpeg;
+
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+
+use eframe::egui;
+
+use config::Config;
+use engine::{AppState, EngineCmd, Status};
+use ffmpeg::{PREVIEW_H, PREVIEW_W};
+
+// ── Catppuccin Mocha palette ──────────────────────────────────────────────────
+const C_BASE: egui::Color32 = egui::Color32::from_rgb(30, 30, 46);    // #1e1e2e
+const C_MANTLE: egui::Color32 = egui::Color32::from_rgb(24, 24, 37);  // #181825
+const C_SURFACE0: egui::Color32 = egui::Color32::from_rgb(49, 50, 68); // #313244
+const C_TEXT: egui::Color32 = egui::Color32::from_rgb(205, 214, 244); // #cdd6f4
+const C_GREEN: egui::Color32 = egui::Color32::from_rgb(166, 227, 161); // #a6e3a1
+const C_YELLOW: egui::Color32 = egui::Color32::from_rgb(249, 226, 175); // #f9e2af
+const C_RED: egui::Color32 = egui::Color32::from_rgb(243, 139, 168);   // #f38ba8
+const C_PEACH: egui::Color32 = egui::Color32::from_rgb(250, 179, 135); // #fab387
+const C_OVERLAY: egui::Color32 = egui::Color32::from_rgb(108, 112, 134); // #6c7086
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
+struct CamPCApp {
+    // Shared state with the engine thread
+    state: Arc<Mutex<AppState>>,
+    // Channel to send control commands to the engine
+    cmd_tx: Sender<EngineCmd>,
+    // Channel to receive decoded preview frames from FFmpeg
+    preview_rx: Receiver<Vec<u8>>,
+    // GPU texture for the preview canvas (updated each time a new frame arrives)
+    preview_texture: Option<egui::TextureHandle>,
+    // Local copy of the config (owned by GUI, sent to engine on change)
+    config: Config,
+    // Whether the user has clicked "Iniciar" (engine is active)
+    started: bool,
+}
+
+impl CamPCApp {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_theme(&cc.egui_ctx);
+
+        let config = Config::load();
+        let state = Arc::new(Mutex::new(AppState {
+            status: Status::Idle,
+        }));
+        let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>();
+        let (preview_tx, preview_rx) = mpsc::channel::<Vec<u8>>();
+
+        engine::spawn(
+            Arc::clone(&state),
+            cmd_rx,
+            preview_tx,
+            config.clone(),
+        );
+
+        Self {
+            state,
+            cmd_tx,
+            preview_rx,
+            preview_texture: None,
+            config,
+            started: false,
+        }
+    }
+
+    fn send(&self, cmd: EngineCmd) {
+        let _ = self.cmd_tx.send(cmd);
+    }
+
+    fn current_status(&self) -> Status {
+        self.state
+            .lock()
+            .map(|s| s.status.clone())
+            .unwrap_or(Status::Idle)
+    }
+
+    fn status_color(s: &Status) -> egui::Color32 {
+        match s {
+            Status::Streaming => C_GREEN,
+            Status::WaitingDevice | Status::Connecting => C_YELLOW,
+            Status::Error(_) => C_RED,
+            Status::Idle => C_TEXT,
+        }
+    }
+}
+
+impl eframe::App for CamPCApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request repaint at ~30 fps so the preview stays live
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
+        // Drain channel — only the *latest* frame matters for a live preview
+        let mut latest: Option<Vec<u8>> = None;
+        while let Ok(frame) = self.preview_rx.try_recv() {
+            latest = Some(frame);
+        }
+        if let Some(frame) = latest {
+            let image = egui::ColorImage::from_rgb(
+                [PREVIEW_W as usize, PREVIEW_H as usize],
+                &frame,
+            );
+            match &mut self.preview_texture {
+                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.preview_texture = Some(ctx.load_texture(
+                        "preview",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+        }
+
+        let status = self.current_status();
+
+        // ── Header ───────────────────────────────────────────────────────────
+        egui::TopBottomPanel::top("header")
+            .frame(egui::Frame::none().fill(C_BASE).inner_margin(egui::Margin::symmetric(10.0, 6.0)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("CamPC")
+                            .strong()
+                            .size(16.0)
+                            .color(C_TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new(status.to_string())
+                            .size(11.0)
+                            .color(Self::status_color(&status)),
+                    );
+                });
+            });
+
+        // ── Controls panel ────────────────────────────────────────────────────
+        egui::TopBottomPanel::bottom("controls")
+            .frame(egui::Frame::none().fill(C_MANTLE).inner_margin(egui::Margin::symmetric(10.0, 8.0)))
+            .show(ctx, |ui| {
+                let mut changed = false;
+
+                // Zoom slider
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Zoom").color(C_TEXT).size(11.0));
+                    ui.add_space(4.0);
+                    let resp = ui.add(
+                        egui::Slider::new(&mut self.config.zoom, 1.0..=4.0)
+                            .custom_formatter(|v, _| format!("{v:.1}×")),
+                    );
+                    if resp.drag_stopped() {
+                        changed = true;
+                    }
+                });
+
+                // FPS slider
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("FPS ").color(C_TEXT).size(11.0));
+                    ui.add_space(4.0);
+                    let resp = ui.add(egui::Slider::new(&mut self.config.fps, 5..=30));
+                    if resp.drag_stopped() {
+                        changed = true;
+                    }
+                });
+
+                // Rotation selectors
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Rotación").color(C_TEXT).size(11.0));
+                    ui.add_space(4.0);
+                    for deg in [0u32, 90, 180, 270] {
+                        let selected = self.config.rotation == deg;
+                        if ui
+                            .add(selectable_btn(&format!("{deg}°"), selected))
+                            .clicked()
+                        {
+                            self.config.rotation = deg;
+                            changed = true;
+                        }
+                    }
+                });
+
+                // Resolution selectors
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Salida  ").color(C_TEXT).size(11.0));
+                    ui.add_space(4.0);
+                    for res in ["720p", "1080p", "480p"] {
+                        let selected = self.config.resolution == res;
+                        if ui.add(selectable_btn(res, selected)).clicked() {
+                            self.config.resolution = res.to_string();
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Action buttons
+                ui.horizontal(|ui| {
+                    if !self.started {
+                        if ui
+                            .add(action_btn("▶  Iniciar", C_GREEN, egui::Color32::BLACK))
+                            .clicked()
+                        {
+                            self.started = true;
+                            self.send(EngineCmd::Start);
+                        }
+                    } else {
+                        if ui
+                            .add(action_btn("■  Detener", C_PEACH, egui::Color32::BLACK))
+                            .clicked()
+                        {
+                            self.started = false;
+                            self.preview_texture = None;
+                            self.send(EngineCmd::Stop);
+                        }
+                    }
+                    ui.add_space(8.0);
+                    if ui.add(action_btn("Salir", C_RED, egui::Color32::WHITE)).clicked() {
+                        self.send(EngineCmd::Stop);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                // Send updated config to engine if anything changed
+                if changed {
+                    self.config.save();
+                    if self.started {
+                        self.send(EngineCmd::UpdateConfig(self.config.clone()));
+                    }
+                }
+            });
+
+        // ── Preview canvas ────────────────────────────────────────────────────
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(egui::Color32::BLACK))
+            .show(ctx, |ui| {
+                let avail = ui.available_size();
+                let aspect = PREVIEW_W as f32 / PREVIEW_H as f32;
+                let w = avail.x.min(avail.y * aspect);
+                let h = w / aspect;
+                let offset = egui::vec2((avail.x - w) * 0.5, (avail.y - h) * 0.5);
+                let rect = egui::Rect::from_min_size(
+                    ui.min_rect().min + offset,
+                    egui::vec2(w, h),
+                );
+
+                if let Some(tex) = &self.preview_texture {
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    let msg = if self.started {
+                        "Esperando stream del teléfono…"
+                    } else {
+                        "Presiona ▶ Iniciar para comenzar"
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        msg,
+                        egui::FontId::proportional(14.0),
+                        C_OVERLAY,
+                    );
+                }
+            });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.send(EngineCmd::Stop);
+        self.config.save();
+    }
+}
+
+// ── Widget helpers ────────────────────────────────────────────────────────────
+
+/// Small pill-style button used for rotation and resolution selectors.
+fn selectable_btn(label: &str, selected: bool) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let bg = if selected { C_SURFACE0 } else { C_MANTLE };
+        let fg = if selected { C_TEXT } else { C_OVERLAY };
+        let btn = egui::Button::new(egui::RichText::new(label).color(fg).size(11.0))
+            .fill(bg)
+            .stroke(egui::Stroke::new(1.0, if selected { C_TEXT } else { C_SURFACE0 }))
+            .rounding(4.0);
+        ui.add(btn)
+    }
+}
+
+/// Coloured action button (Iniciar / Detener / Salir).
+fn action_btn(
+    label: &str,
+    bg: egui::Color32,
+    fg: egui::Color32,
+) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        ui.add(
+            egui::Button::new(egui::RichText::new(label).color(fg).strong().size(11.0))
+                .fill(bg)
+                .rounding(4.0),
+        )
+    }
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+fn apply_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = C_BASE;
+    visuals.window_fill = C_BASE;
+    visuals.extreme_bg_color = C_MANTLE;
+    visuals.widgets.inactive.bg_fill = C_SURFACE0;
+    visuals.widgets.hovered.bg_fill = C_SURFACE0;
+    visuals.widgets.active.bg_fill = C_SURFACE0;
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, C_TEXT);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, C_TEXT);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, C_TEXT);
+    ctx.set_visuals(visuals);
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("CamPC")
+            .with_inner_size([680.0, 540.0])
+            .with_min_inner_size([480.0, 380.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "CamPC",
+        options,
+        Box::new(|cc| Ok(Box::new(CamPCApp::new(cc)))),
+    )
+}
