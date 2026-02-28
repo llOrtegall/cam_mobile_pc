@@ -45,3 +45,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.log
+
+# ── Rust (linux/campc-rust) ───────────────────────────────────────────────────
+linux/campc-rust/target/
