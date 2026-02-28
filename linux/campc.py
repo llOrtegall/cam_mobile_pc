@@ -6,6 +6,7 @@ Requires: opencv-python, pyfakewebcam, Pillow, python3-tk
 """
 
 import atexit
+import os
 import signal
 import subprocess
 import threading
@@ -227,14 +228,12 @@ class CamPCApp:
         self._running = False
         self._set_status("Desconectado", "#f38ba8")
         with self._lock:
-            self._fake_cam = None
-            self._fake_cam_res = None
+            self._close_fake_cam()
 
     def _on_resolution_change(self, *_):
         """Force FakeWebcam recreation on next frame."""
         with self._lock:
-            self._fake_cam = None
-            self._fake_cam_res = None
+            self._close_fake_cam()
 
     # ── Capture loop (background thread) ─────────────────────────────────────
 
@@ -299,21 +298,44 @@ class CamPCApp:
 
         self.root.after(0, self._set_status, "Detenido", "#cdd6f4")
 
+    def _close_fake_cam(self):
+        if self._fake_cam is not None:
+            try:
+                os.close(self._fake_cam._video_device)
+            except Exception:
+                pass
+            self._fake_cam = None
+            self._fake_cam_res = None
+
     def _write_to_v4l2(self, rgb_frame, w: int, h: int):
         """Write RGB frame to FakeWebcam, recreating if resolution changed."""
         with self._lock:
             if self._fake_cam is None or self._fake_cam_res != (w, h):
+                self._close_fake_cam()
                 try:
                     self._fake_cam = pyfakewebcam.FakeWebcam(V4L2_DEVICE, w, h)
-                    self._fake_cam_res = (w, h)
+                    # Read back actual dimensions accepted by the device
+                    # (may differ from requested if a reader is already connected)
+                    actual_w = self._fake_cam._settings.fmt.pix.width
+                    actual_h = self._fake_cam._settings.fmt.pix.height
+                    self._fake_cam_res = (actual_w, actual_h)
+                    if (actual_w, actual_h) != (w, h):
+                        print(f"[campc] Device locked to {actual_w}×{actual_h}, requested {w}×{h}")
                 except Exception as exc:
                     print(f"[campc] FakeWebcam error: {exc}")
+                    self._fake_cam = None
                     return
+
+            # Resize frame to actual device dimensions before sending
+            actual_w, actual_h = self._fake_cam_res
+            if rgb_frame.shape[1] != actual_w or rgb_frame.shape[0] != actual_h:
+                rgb_frame = cv2.resize(rgb_frame, (actual_w, actual_h),
+                                       interpolation=cv2.INTER_LINEAR)
             try:
                 self._fake_cam.schedule_frame(rgb_frame)
             except Exception as exc:
                 print(f"[campc] schedule_frame error: {exc}")
-                self._fake_cam = None
+                self._close_fake_cam()
 
     # ── UI updates (always called via root.after from capture thread) ─────────
 
