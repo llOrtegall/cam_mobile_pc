@@ -10,13 +10,18 @@ import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 
-class CameraStreamingService : Service() {
+class CameraStreamingService : Service(), LifecycleOwner {
+
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
     companion object {
         private const val TAG = "CameraStreamingService"
         private const val NOTIFICATION_ID = 1
@@ -35,6 +40,9 @@ class CameraStreamingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
         createNotificationChannel()
     }
 
@@ -70,7 +78,7 @@ class CameraStreamingService : Service() {
 
         val streamer = CameraStreamer(server)
         cameraStreamer = streamer
-        streamer.start(ProcessLifecycleOwner.get(), applicationContext)
+        streamer.start(this, applicationContext)
 
         Log.i(TAG, "Streaming service started")
     }
@@ -94,6 +102,9 @@ class CameraStreamingService : Service() {
         super.onDestroy()
         cleanup()
         serviceScope.cancel()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
 
     private fun buildNotification(contentText: String): Notification {
