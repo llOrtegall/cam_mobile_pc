@@ -55,33 +55,32 @@ pub fn build_filter_complex(cfg: &Config) -> String {
     )
 }
 
-/// Spawns FFmpeg with:
-///   - Low-latency input flags (no probe/analysis buffering)
-///   - filter_complex built from `cfg`
-///   - Output 1: -f v4l2 → /dev/video10
-///   - Output 2: rawvideo rgb24 → stdout (preview)
+/// Spawns FFmpeg and returns (Child, pid), or None on failure.
 ///
-/// Spawns a background reader thread that pushes frames to `preview_tx`.
-/// Returns the Child handle, or None if the spawn failed.
-pub fn spawn_ffmpeg(cfg: &Config, preview_tx: Sender<Vec<u8>>) -> Option<Child> {
+/// Key flags:
+///  - `-f mpjpeg` explicitly tells FFmpeg the input is MIME multipart JPEG,
+///    avoiding the format auto-detection that fails with small probesize.
+///  - `-fflags nobuffer -flags low_delay` minimise end-to-end latency.
+///  - Output 1: `-f v4l2` writes directly to the v4l2loopback device.
+///  - Output 2: `rawvideo rgb24` piped to stdout for the GUI preview.
+pub fn spawn_ffmpeg(cfg: &Config, preview_tx: Sender<Vec<u8>>) -> Option<(Child, u32)> {
     let filter = build_filter_complex(cfg);
     let tcp_url = format!("tcp://localhost:{}", cfg.adb_port);
     let fps_str = cfg.fps.to_string();
     let preview_fps_str = cfg.preview_fps.to_string();
     let device = cfg.v4l2_device.clone();
 
-    // Build arg list as owned Strings first so references below are valid
     let args: Vec<String> = vec![
-        // Suppress the startup banner
         "-hide_banner".into(),
-        // Low-latency flags: skip stream analysis to avoid initial buffering
+        // Low-latency flags
         "-fflags".into(), "nobuffer".into(),
         "-flags".into(), "low_delay".into(),
-        "-probesize".into(), "32".into(),
-        "-analyzeduration".into(), "0".into(),
-        // Input: MJPEG over TCP from ADB forward
+        // Explicitly specify the multipart-JPEG format so FFmpeg doesn't need
+        // to probe the stream (probing with a small buffer causes format
+        // detection failures on reconnection).
+        "-f".into(), "mpjpeg".into(),
         "-i".into(), tcp_url,
-        // Video processing
+        // Video processing pipeline
         "-filter_complex".into(), filter,
         // ── Output 1: v4l2loopback ──
         "-map".into(), "[v4l2out]".into(),
@@ -100,13 +99,16 @@ pub fn spawn_ffmpeg(cfg: &Config, preview_tx: Sender<Vec<u8>>) -> Option<Child> 
     let mut child = Command::new("ffmpeg")
         .args(&args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null()) // suppress FFmpeg log noise; set to Stdio::inherit() to debug
+        // Redirect FFmpeg's log to stderr of the parent so errors are visible
+        // when running from a terminal. Use Stdio::null() to silence.
+        .stderr(Stdio::inherit())
         .spawn()
         .ok()?;
 
+    let pid = child.id();
     let stdout = child.stdout.take()?;
     spawn_preview_reader(stdout, preview_tx);
-    Some(child)
+    Some((child, pid))
 }
 
 /// Reads fixed-size rawvideo rgb24 frames from `stdout` and forwards them
@@ -119,7 +121,7 @@ fn spawn_preview_reader(stdout: ChildStdout, tx: Sender<Vec<u8>>) {
             match reader.read_exact(&mut buf) {
                 Ok(()) => {
                     if tx.send(buf.clone()).is_err() {
-                        break; // GUI dropped the receiver — time to quit
+                        break;
                     }
                 }
                 Err(_) => break, // pipe closed → FFmpeg exited
@@ -134,4 +136,9 @@ pub fn kill(proc: &mut Option<Child>) {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// Kill a process by raw PID (used by on_exit to kill orphaned FFmpeg).
+pub fn kill_pid(pid: u32) {
+    let _ = Command::new("kill").arg(pid.to_string()).status();
 }

@@ -48,11 +48,14 @@ pub fn spawn(
     cmd_rx: Receiver<EngineCmd>,
     preview_tx: Sender<Vec<u8>>,
     initial_config: Config,
+    // Shared PID of the current FFmpeg process. on_exit() reads this to kill
+    // FFmpeg synchronously even if the engine thread is sleeping.
+    ffmpeg_pid: Arc<Mutex<Option<u32>>>,
 ) {
-    thread::spawn(move || run(state, cmd_rx, preview_tx, initial_config));
+    thread::spawn(move || run(state, cmd_rx, preview_tx, initial_config, ffmpeg_pid));
 }
 
-// ── Engine loop ───────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn set_status(state: &Arc<Mutex<AppState>>, s: Status) {
     if let Ok(mut st) = state.lock() {
@@ -60,11 +63,20 @@ fn set_status(state: &Arc<Mutex<AppState>>, s: Status) {
     }
 }
 
+fn store_pid(ffmpeg_pid: &Arc<Mutex<Option<u32>>>, pid: Option<u32>) {
+    if let Ok(mut p) = ffmpeg_pid.lock() {
+        *p = pid;
+    }
+}
+
+// ── Engine loop ───────────────────────────────────────────────────────────────
+
 fn run(
     state: Arc<Mutex<AppState>>,
     cmd_rx: Receiver<EngineCmd>,
     preview_tx: Sender<Vec<u8>>,
     initial_config: Config,
+    ffmpeg_pid: Arc<Mutex<Option<u32>>>,
 ) {
     let mut config = initial_config;
     let mut ffmpeg_proc: Option<Child> = None;
@@ -86,6 +98,7 @@ fn run(
                 EngineCmd::Stop => {
                     active = false;
                     ffmpeg::kill(&mut ffmpeg_proc);
+                    store_pid(&ffmpeg_pid, None);
                     if device_ready {
                         adb::remove_forward(config.adb_port);
                     }
@@ -96,8 +109,8 @@ fn run(
                     let port_changed = new_cfg.adb_port != config.adb_port;
                     config = new_cfg;
                     if ffmpeg_proc.is_some() {
-                        // Kill FFmpeg — will be respawned on next iteration
                         ffmpeg::kill(&mut ffmpeg_proc);
+                        store_pid(&ffmpeg_pid, None);
                         set_status(&state, Status::Connecting);
                     }
                     if port_changed && device_ready {
@@ -117,15 +130,14 @@ fn run(
                 let connected = adb::device_connected();
 
                 if connected && !device_ready {
-                    // Device just appeared — set up port forward
                     if adb::forward(config.adb_port) {
                         device_ready = true;
                     } else {
                         set_status(&state, Status::Error("ADB forward falló".to_string()));
                     }
                 } else if !connected && device_ready {
-                    // Device just disconnected
                     ffmpeg::kill(&mut ffmpeg_proc);
+                    store_pid(&ffmpeg_pid, None);
                     adb::remove_forward(config.adb_port);
                     device_ready = false;
                     set_status(&state, Status::WaitingDevice);
@@ -139,12 +151,12 @@ fn run(
                 let ffmpeg_exited = ffmpeg_proc
                     .as_mut()
                     .map(|p| p.try_wait().ok().flatten().is_some())
-                    .unwrap_or(true); // None means not yet spawned
+                    .unwrap_or(true);
 
                 if ffmpeg_exited {
                     if ffmpeg_proc.is_some() {
-                        // Process died unexpectedly — clean up and wait briefly
                         ffmpeg::kill(&mut ffmpeg_proc);
+                        store_pid(&ffmpeg_pid, None);
                         set_status(&state, Status::Connecting);
                         thread::sleep(Duration::from_secs(2));
                     }
@@ -152,11 +164,13 @@ fn run(
                     set_status(&state, Status::Connecting);
 
                     match ffmpeg::spawn_ffmpeg(&config, preview_tx.clone()) {
-                        Some(proc) => {
+                        Some((proc, pid)) => {
+                            store_pid(&ffmpeg_pid, Some(pid));
                             ffmpeg_proc = Some(proc);
                             set_status(&state, Status::Streaming);
                         }
                         None => {
+                            store_pid(&ffmpeg_pid, None);
                             set_status(
                                 &state,
                                 Status::Error("No se pudo iniciar FFmpeg".to_string()),

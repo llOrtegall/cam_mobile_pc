@@ -38,6 +38,9 @@ struct CamPCApp {
     config: Config,
     // Whether the user has clicked "Iniciar" (engine is active)
     started: bool,
+    // PID of the running FFmpeg child. on_exit() kills it synchronously so it
+    // doesn't become an orphan holding /dev/video10 after campc exits.
+    ffmpeg_pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl CamPCApp {
@@ -50,12 +53,14 @@ impl CamPCApp {
         }));
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>();
         let (preview_tx, preview_rx) = mpsc::channel::<Vec<u8>>();
+        let ffmpeg_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
         engine::spawn(
             Arc::clone(&state),
             cmd_rx,
             preview_tx,
             config.clone(),
+            Arc::clone(&ffmpeg_pid),
         );
 
         Self {
@@ -65,6 +70,7 @@ impl CamPCApp {
             preview_texture: None,
             config,
             started: false,
+            ffmpeg_pid,
         }
     }
 
@@ -274,7 +280,20 @@ impl eframe::App for CamPCApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Signal the engine (best-effort; it may be sleeping)
         self.send(EngineCmd::Stop);
+
+        // Synchronously kill FFmpeg so it doesn't become an orphan holding
+        // /dev/video10. The engine might not have processed Stop yet.
+        if let Ok(pid_opt) = self.ffmpeg_pid.lock() {
+            if let Some(pid) = *pid_opt {
+                ffmpeg::kill_pid(pid);
+            }
+        }
+
+        // Remove ADB forward synchronously so the next session starts clean.
+        adb::remove_forward(self.config.adb_port);
+
         self.config.save();
     }
 }

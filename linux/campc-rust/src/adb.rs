@@ -11,9 +11,16 @@ pub fn device_connected() -> bool {
         .any(|line| line.ends_with("device")) // excludes "offline" / "unauthorized"
 }
 
-/// Runs `adb forward tcp:PORT tcp:PORT`. Returns true on success.
+/// Establishes the ADB port forward for `port`.
+///
+/// Removes any existing (potentially stale) forward first so ADB starts
+/// from a clean state. Returns true if the forward is active afterwards.
 pub fn forward(port: u16) -> bool {
     let spec = format!("tcp:{port}");
+    // Remove first to clear any stale connection state from a previous session.
+    let _ = Command::new("adb")
+        .args(["forward", "--remove", &spec])
+        .status();
     Command::new("adb")
         .args(["forward", &spec, &spec])
         .status()
