@@ -1,217 +1,47 @@
-# General
-*.log
-*.tmp
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *.bak
-*.~
-*.DS_Store
-Thumbs.db
+*.tmp
 
-# Android Studio/Gradle
-android/.idea/
-android/.gradle/
-android/build/
-android/local.properties
-android/app/build/
-android/app/release/
-android/app/.cxx/
-android/app/.externalNativeBuild/
-android/app/.idea/
-android/app/.gradle/
-android/app/.DS_Store
-android/gradle/
-android/gradlew
-android/gradlew.bat
-android/build.gradle.kts
-android/settings.gradle.kts
-android/gradle.properties
-android/app/proguard-rules.pro
-android/app/build.gradle.kts
-android/app/proguard-rules.pro
-android/app/build/
-android/app/build/
-android/app/build/intermediates/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/kotlin/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-android/app/build/outputs/
-android/app/build/tmp/
-android/app/build/generated/
-android/app/build/intermediates/
-android/app/build/reports/
-android/app/build/logs/
-android/app/build/test-results/
-android/app/build/test-classes/
-android/app/build/data_binding_base_class_source_out/
-android/app/build/data_binding_base_class_log_artifact/
-android/app/build/data_binding_dependency_artifacts/
-android/app/build/data_binding_layout_info_type_merge/
-android/app/build/data_binding_layout_info_type_package/
-android/app/build/compileDebugKotlin/
-android/app/build/compileDebugJavaWithJavac/
-android/app/build/kotlin-classes/
-
-# Linux scripts
-linux/*.log
-linux/*.tmp
-linux/*.bak
-
-# Reports
-android/build/reports/
-
-# Misc
-*.class
-*.apk
-*.ap_*
-*.dex
-*.so
-*.jar
-*.keystore
-*.jks
-*.zip
-*.tar
-*.tar.gz
-*.7z
-*.rar
-*.exe
-*.dll
-*.out
-*.bin
-*.img
-*.iso
-*.db
-*.sqlite
-*.sublime-workspace
-*.sublime-project
-
-# VS Code
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.idea/
+*.iml
 .vscode/
 
-# Node/npm (if used)
-node_modules/
-package-lock.json
-npm-debug.log
+# ── Android / Gradle — build outputs and local config ─────────────────────────
+# Ignore generated build dirs anywhere in the tree
+**/build/
+# Ignore Gradle caches (downloaded dependencies, daemon state)
+**/.gradle/
+# local.properties contains the machine-specific Android SDK path — never commit
+local.properties
+# C++ native build cache
+**/.cxx/
+# App release signing artifacts
+*.keystore
+*.jks
+!debug.keystore
 
-# Python (if used)
+# ── What NOT to ignore (Gradle project skeleton) ──────────────────────────────
+# These files define the project and MUST be committed:
+#   gradlew, gradlew.bat, gradle/wrapper/gradle-wrapper.jar,
+#   gradle/wrapper/gradle-wrapper.properties, gradle/libs.versions.toml,
+#   gradle/gradle-daemon-jvm.properties, build.gradle.kts,
+#   settings.gradle.kts, gradle.properties, app/build.gradle.kts,
+#   app/proguard-rules.pro
+# None of the above match the patterns above, so they are tracked by default.
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
+*.apk
+*.aab
+*.dex
+*.class
+
+# ── Python (linux scripts) ────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-
-# Others
-.idea/
-*.iml
-*.ipr
-*.iws
-
-# End of file
+*.log
