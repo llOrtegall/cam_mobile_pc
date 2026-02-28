@@ -1,0 +1,24 @@
+[package]
+name = "campc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "campc"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "x11",
+] }
+egui = "0.29"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
