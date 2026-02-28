@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +29,7 @@ class CameraStreamingService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var tcpServer: TcpServer? = null
     private var cameraStreamer: CameraStreamer? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,6 +47,11 @@ class CameraStreamingService : Service() {
     }
 
     private fun startStreaming() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mobilecamapp:streaming").apply {
+            acquire()
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification("Waiting for connection…"))
 
         val server = TcpServer(
@@ -79,6 +86,8 @@ class CameraStreamingService : Service() {
         tcpServer?.stop()
         cameraStreamer = null
         tcpServer = null
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
     }
 
     override fun onDestroy() {
