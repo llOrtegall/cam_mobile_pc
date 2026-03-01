@@ -11,23 +11,18 @@ pub const PREVIEW_W: u32 = 320;
 pub const PREVIEW_H: u32 = 180;
 pub const PREVIEW_FRAME_BYTES: usize = (PREVIEW_W * PREVIEW_H * 3) as usize;
 
-/// Builds a simple `-vf` filter string from the current config.
+// Fixed output resolution — always 1080p for maximum quality
+pub const OUTPUT_W: u32 = 1920;
+pub const OUTPUT_H: u32 = 1080;
+
+/// Builds a `-vf` filter string from the current config.
 ///
-/// Applies centre-crop zoom, rotation, and scale to the target resolution.
+/// Applies rotation, aspect-ratio crop, and scale to fixed 1080p output.
 /// Single output — no split needed since V4L2 writing is done in Rust.
 pub fn build_vf_filter(cfg: &Config) -> String {
-    let (out_w, out_h) = cfg.resolution_dims();
     let mut steps: Vec<String> = Vec::new();
 
-    // 1. Centre-crop for zoom
-    if cfg.zoom > 1.001 {
-        steps.push(format!(
-            "crop=iw/{z}:ih/{z}:(iw-iw/{z})/2:(ih-ih/{z})/2",
-            z = cfg.zoom
-        ));
-    }
-
-    // 2. Rotation (transpose avoids quality loss vs. rotate filter)
+    // 1. Rotation (transpose avoids quality loss vs. rotate filter)
     match cfg.rotation {
         90 => steps.push("transpose=1".to_string()),  // 90° CW
         180 => steps.push("hflip,vflip".to_string()), // 180°
@@ -35,14 +30,25 @@ pub fn build_vf_filter(cfg: &Config) -> String {
         _ => {}
     }
 
-    // 3. Scale to target output resolution
-    steps.push(format!("scale={out_w}:{out_h}"));
+    // 2. Crop to 16:9 aspect ratio.
+    // The phone may stream a non-16:9 frame. Without this step FFmpeg
+    // stretches it and sets SAR≠1, causing distortion in apps that ignore SAR.
+    steps.push(format!(
+        "crop=iw:iw*{OUTPUT_H}/{OUTPUT_W}:0:(ih-iw*{OUTPUT_H}/{OUTPUT_W})/2"
+    ));
 
-    if steps.is_empty() {
-        "null".to_string()
-    } else {
-        steps.join(",")
-    }
+    // 3. Scale to 1920×1080.
+    // in_range=full   — input is JPEG/full-range (yuvj420p, Y 0-255)
+    // out_range=limited — standard TV range expected by V4L2 consumers (Y 16-235)
+    // flags=lanczos   — higher-quality resampling vs. default bilinear
+    steps.push(format!(
+        "scale={OUTPUT_W}:{OUTPUT_H}:in_range=full:out_range=limited:flags=lanczos"
+    ));
+
+    // 4. Ensure square pixels (SAR 1:1) so consuming apps display correctly.
+    steps.push("setsar=1".to_string());
+
+    steps.join(",")
 }
 
 /// Spawns FFmpeg and returns (Child, pid), or None on failure.
@@ -56,7 +62,7 @@ pub fn spawn_ffmpeg(cfg: &Config, preview_tx: Sender<Vec<u8>>) -> Option<(Child,
     let tcp_url = format!("tcp://localhost:{}", cfg.adb_port);
     let fps_str = cfg.fps.to_string();
     let device = cfg.v4l2_device.clone();
-    let (out_w, out_h) = cfg.resolution_dims();
+    let (out_w, out_h) = (OUTPUT_W, OUTPUT_H);
 
     let args: Vec<String> = vec![
         "-hide_banner".into(),
@@ -152,7 +158,8 @@ fn yuv420p_to_preview_rgb(yuv: &[u8], src_w: u32, src_h: u32) -> Vec<u8> {
         for px in 0..PREVIEW_W {
             let sx = px * scale_x;
 
-            let y = y_plane[(sy * src_w + sx) as usize] as i32;
+            // Limited-range BT.601: Y [16,235] → [0,255]; Cb/Cr centred at 128.
+            let y = (((y_plane[(sy * src_w + sx) as usize] as i32) - 16) * 255 / 219).clamp(0, 255);
             let u = u_plane[((sy / 2) * (src_w / 2) + (sx / 2)) as usize] as i32 - 128;
             let v = v_plane[((sy / 2) * (src_w / 2) + (sx / 2)) as usize] as i32 - 128;
 
