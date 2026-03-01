@@ -7,8 +7,8 @@ use crate::config::Config;
 use crate::v4l2::V4l2Writer;
 
 // Preview stream dimensions shown in the GUI canvas (RGB24)
-pub const PREVIEW_W: u32 = 320;
-pub const PREVIEW_H: u32 = 180;
+pub const PREVIEW_W: u32 = 640;
+pub const PREVIEW_H: u32 = 360;
 pub const PREVIEW_FRAME_BYTES: usize = (PREVIEW_W * PREVIEW_H * 3) as usize;
 
 // Fixed output resolution — always 1080p for maximum quality
@@ -69,6 +69,8 @@ pub fn spawn_ffmpeg(cfg: &Config, preview_tx: Sender<Vec<u8>>) -> Option<(Child,
         // Low-latency flags
         "-fflags".into(), "nobuffer".into(),
         "-flags".into(), "low_delay".into(),
+        "-probesize".into(), "32".into(),
+        "-analyzeduration".into(), "0".into(),
         // Explicitly specify multipart-JPEG format — no stream probing needed.
         "-f".into(), "mpjpeg".into(),
         "-i".into(), tcp_url,
@@ -107,7 +109,7 @@ fn spawn_frame_reader(
 ) {
     thread::spawn(move || {
         let frame_bytes = (out_w * out_h * 3 / 2) as usize;
-        let mut reader = BufReader::with_capacity(frame_bytes * 2, stdout);
+        let mut reader = BufReader::with_capacity(frame_bytes, stdout);
         let mut yuv_buf = vec![0u8; frame_bytes];
 
         // Open the V4L2 device once and reuse across frames.

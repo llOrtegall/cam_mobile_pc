@@ -47,6 +47,8 @@ class TcpServer(
 
                     Log.i(TAG, "Client connected: ${client.inetAddress}")
                     currentClient = client
+                    client.tcpNoDelay = true
+                    client.sendBufferSize = 65536
                     outputStream = client.getOutputStream()
                     onClientConnected()
 

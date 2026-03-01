@@ -8,6 +8,8 @@ import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.lifecycle.LifecycleOwner
 import java.io.ByteArrayOutputStream
@@ -20,8 +22,7 @@ class CameraStreamer(
 ) {
     companion object {
         private const val TAG = "CameraStreamer"
-        private const val JPEG_QUALITY = 85
-        private val TARGET_RESOLUTION = Size(1920, 1080)
+        private const val JPEG_QUALITY = 95
     }
 
     private val analyzerExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -38,8 +39,17 @@ class CameraStreamer(
     private fun bindCamera(lifecycleOwner: LifecycleOwner) {
         val provider = cameraProvider ?: return
 
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(1920, 1080),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
         val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(TARGET_RESOLUTION)
+            .setResolutionSelector(resolutionSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()

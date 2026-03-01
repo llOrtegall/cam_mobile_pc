@@ -107,6 +107,7 @@ fn run(
                 }
                 EngineCmd::UpdateConfig(new_cfg) => {
                     let port_changed = new_cfg.adb_port != config.adb_port;
+                    let old_port = config.adb_port;
                     config = new_cfg;
                     if ffmpeg_proc.is_some() {
                         ffmpeg::kill(&mut ffmpeg_proc);
@@ -114,7 +115,7 @@ fn run(
                         set_status(&state, Status::Connecting);
                     }
                     if port_changed && device_ready {
-                        adb::remove_forward(config.adb_port);
+                        adb::remove_forward(old_port);
                         device_ready = false;
                         last_adb_check = Instant::now() - Duration::from_secs(60);
                     }
@@ -158,7 +159,7 @@ fn run(
                         ffmpeg::kill(&mut ffmpeg_proc);
                         store_pid(&ffmpeg_pid, None);
                         set_status(&state, Status::Connecting);
-                        thread::sleep(Duration::from_secs(2));
+                        thread::sleep(Duration::from_millis(500));
                     }
 
                     set_status(&state, Status::Connecting);

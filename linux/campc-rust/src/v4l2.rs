@@ -4,7 +4,10 @@ use std::os::unix::io::AsRawFd;
 
 // ── V4L2 constants ────────────────────────────────────────────────────────────
 
-const V4L2_BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
+// With exclusive_caps=1, v4l2loopback only advertises CAPTURE capability.
+// The producer must use CAPTURE buf_type for VIDIOC_S_FMT to avoid EINVAL,
+// then write raw frames directly via write().
+const V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
 const V4L2_FIELD_NONE: u32 = 1;
 // YU12 = planar YUV 4:2:0, same as FFmpeg yuv420p
 const V4L2_PIX_FMT_YUV420: u32 = fourcc(b'Y', b'U', b'1', b'2');
@@ -66,7 +69,7 @@ impl V4l2Writer {
         let sizeimage = width * height * 3 / 2;
 
         let mut fmt = V4l2Format {
-            buf_type: V4L2_BUF_TYPE_VIDEO_OUTPUT,
+            buf_type: V4L2_BUF_TYPE_VIDEO_CAPTURE,
             _pad: 0,
             fmt: [0u8; 200],
         };
