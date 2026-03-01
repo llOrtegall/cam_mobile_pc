@@ -17,7 +17,7 @@ pub const OUTPUT_H: u32 = 720;
 
 /// Builds a `-vf` filter string from the current config.
 ///
-/// Applies rotation, aspect-ratio crop, and scale to fixed 1080p output.
+/// Applies rotation, aspect-ratio crop, and scale to fixed 720p output.
 /// Single output — no split needed since V4L2 writing is done in Rust.
 pub fn build_vf_filter(cfg: &Config) -> String {
     let mut steps: Vec<String> = Vec::new();
@@ -37,10 +37,9 @@ pub fn build_vf_filter(cfg: &Config) -> String {
         "crop=iw:iw*{OUTPUT_H}/{OUTPUT_W}:0:(ih-iw*{OUTPUT_H}/{OUTPUT_W})/2"
     ));
 
-    // 3. Scale to 1920×1080.
+    // 3. Scale to fixed 1280×720 output.
     // in_range=full   — input is JPEG/full-range (yuvj420p, Y 0-255)
     // out_range=limited — standard TV range expected by V4L2 consumers (Y 16-235)
-    // flags=lanczos   — higher-quality resampling vs. default bilinear
     steps.push(format!(
         "scale={OUTPUT_W}:{OUTPUT_H}:in_range=full:out_range=limited"
     ));
@@ -51,46 +50,56 @@ pub fn build_vf_filter(cfg: &Config) -> String {
     steps.join(",")
 }
 
+fn build_ffmpeg_args(cfg: &Config, tcp_url: &str, vf: &str) -> Vec<String> {
+    let fps_str = cfg.fps.to_string();
+    vec![
+        "-hide_banner".into(),
+        // Low-latency flags.
+        "-fflags".into(),
+        "nobuffer".into(),
+        "-flags".into(),
+        "low_delay".into(),
+        "-probesize".into(),
+        "32".into(),
+        "-analyzeduration".into(),
+        "0".into(),
+        // Absorb short network jitter bursts before decoder consumption.
+        "-thread_queue_size".into(),
+        "64".into(),
+        // Input: multipart MJPEG stream from phone.
+        "-f".into(),
+        "mpjpeg".into(),
+        "-i".into(),
+        tcp_url.to_string(),
+        "-vf".into(),
+        vf.to_string(),
+        // Output: raw yuv420p frames to stdout for Rust V4L2 writer.
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-r".into(),
+        fps_str,
+        "pipe:1".into(),
+    ]
+}
+
 /// Spawns FFmpeg and returns (Child, pid), or None on failure.
 ///
 /// `tcp_host` and `tcp_port` identify the MJPEG source:
 ///   - USB mode: `("localhost", adb_port)` — tunnelled through ADB forward.
 ///   - WiFi mode: `("192.168.x.x", 5000)` — direct connection to the phone.
-///
-/// FFmpeg outputs a single rawvideo yuv420p stream to stdout.
-/// A reader thread reads frames, writes them to the V4L2 device via Rust
-/// ioctls (bypassing FFmpeg's v4l2 muxer which fails on kernel 6.17), and
-/// generates downscaled RGB24 previews for the GUI.
-pub fn spawn_ffmpeg(cfg: &Config, tcp_host: &str, tcp_port: u16, preview_tx: SyncSender<Vec<u8>>) -> Option<(Child, u32)> {
+pub fn spawn_ffmpeg(
+    cfg: &Config,
+    tcp_host: &str,
+    tcp_port: u16,
+    preview_tx: SyncSender<Vec<u8>>,
+) -> Option<(Child, u32)> {
     let vf = build_vf_filter(cfg);
     let tcp_url = format!("tcp://{}:{}", tcp_host, tcp_port);
-    let fps_str = cfg.fps.to_string();
+    let args = build_ffmpeg_args(cfg, &tcp_url, &vf);
     let device = cfg.v4l2_device.clone();
     let (out_w, out_h) = (OUTPUT_W, OUTPUT_H);
-
-    let args: Vec<String> = vec![
-        "-hide_banner".into(),
-        // Low-latency flags
-        "-fflags".into(), "nobuffer".into(),
-        "-flags".into(), "low_delay".into(),
-        "-probesize".into(), "32".into(),
-        "-analyzeduration".into(), "0".into(),
-        // Allow FFmpeg's thread queue to buffer enough packets before the
-        // decoder starts consuming them — prevents starvation under WiFi jitter.
-        "-thread_queue_size".into(), "64".into(),
-        // Explicitly specify multipart-JPEG format — no stream probing needed.
-        "-f".into(), "mpjpeg".into(),
-        "-i".into(), tcp_url,
-        // Video filter: zoom → rotate → scale
-        "-vf".into(), vf,
-        // Single output: raw yuv420p frames to stdout.
-        // Rust reads these and writes to /dev/videoN via VIDIOC_S_FMT + write(),
-        // which works on v4l2loopback even when VIDIOC_G_FMT returns EINVAL.
-        "-f".into(), "rawvideo".into(),
-        "-pix_fmt".into(), "yuv420p".into(),
-        "-r".into(), fps_str,
-        "pipe:1".into(),
-    ];
 
     let mut child = Command::new("ffmpeg")
         .args(&args)
@@ -141,30 +150,25 @@ fn spawn_frame_reader(
         };
         let mut frame_count: usize = 0;
 
-        loop {
-            match reader.read_exact(&mut yuv_buf) {
-                Ok(()) => {
-                    // Always write the full-resolution frame to V4L2.
-                    if let Some(ref mut writer) = v4l2 {
-                        if !writer.write_frame(&yuv_buf) {
-                            eprintln!("[ffmpeg] V4L2 write error — retrying open");
-                            v4l2 = V4l2Writer::new(&device, out_w, out_h);
-                        }
-                    }
-
-                    // Throttled: only convert and send a preview every N frames.
-                    frame_count += 1;
-                    if frame_count % preview_every == 0 {
-                        let preview = yuv420p_to_preview_rgb(&yuv_buf, out_w, out_h);
-                        match preview_tx.try_send(preview) {
-                            // Sent OK, or GUI is temporarily slow — drop this frame.
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            // Receiver dropped — GUI is gone, stop the thread.
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
+        while let Ok(()) = reader.read_exact(&mut yuv_buf) {
+            // Always write the full-resolution frame to V4L2.
+            if let Some(ref mut writer) = v4l2 {
+                if !writer.write_frame(&yuv_buf) {
+                    eprintln!("[ffmpeg] V4L2 write error — retrying open");
+                    v4l2 = V4l2Writer::new(&device, out_w, out_h);
                 }
-                Err(_) => break, // pipe closed → FFmpeg exited
+            }
+
+            // Throttle preview work so UI conversion/upload stays cheap.
+            frame_count += 1;
+            if frame_count.is_multiple_of(preview_every) {
+                let preview = yuv420p_to_preview_rgb(&yuv_buf, out_w, out_h);
+                match preview_tx.try_send(preview) {
+                    // Sent OK, or GUI is temporarily slow — drop this frame.
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    // Receiver dropped — GUI is gone, stop the thread.
+                    Err(TrySendError::Disconnected(_)) => break,
+                }
             }
         }
     });
@@ -189,21 +193,13 @@ fn yuv420p_to_preview_rgb(yuv: &[u8], src_w: u32, src_h: u32) -> Vec<u8> {
         for px in 0..PREVIEW_W {
             let sx = px * scale_x;
 
-            // ITU-R BT.601 limited-range YCbCr → RGB (integer approximation):
-            //   Y'  in [16, 235]  → rescale to [0, 255]:  y = (Y' − 16) × 255/219
-            //   Cb, Cr centred at 128:  u = Cb − 128,  v = Cr − 128
-            //
-            // Matrix coefficients (×1000 to stay in integer arithmetic):
-            //   R = Y + 1.402  × Cr   →  y + 1402 × v / 1000
-            //   G = Y − 0.344  × Cb   →  y −  344 × u / 1000
-            //       − 0.714  × Cr         −  714 × v / 1000
-            //   B = Y + 1.772  × Cb   →  y + 1772 × u / 1000
+            // Convert limited-range YUV (BT.601) to RGB using integer math.
             let y = (((y_plane[(sy * src_w + sx) as usize] as i32) - 16) * 255 / 219).clamp(0, 255);
             let u = u_plane[((sy / 2) * (src_w / 2) + (sx / 2)) as usize] as i32 - 128;
             let v = v_plane[((sy / 2) * (src_w / 2) + (sx / 2)) as usize] as i32 - 128;
 
             let r = (y + 1402 * v / 1000).clamp(0, 255) as u8;
-            let g = (y -  344 * u / 1000 - 714 * v / 1000).clamp(0, 255) as u8;
+            let g = (y - 344 * u / 1000 - 714 * v / 1000).clamp(0, 255) as u8;
             let b = (y + 1772 * u / 1000).clamp(0, 255) as u8;
 
             let idx = ((py * PREVIEW_W + px) * 3) as usize;

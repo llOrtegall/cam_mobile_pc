@@ -46,6 +46,12 @@ struct CamPCApp {
     ffmpeg_pid: Arc<Mutex<Option<u32>>>,
 }
 
+#[derive(Default)]
+struct ConfigUpdate {
+    stream_relevant: bool,
+    zoom_only: bool,
+}
+
 impl CamPCApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
@@ -106,23 +112,15 @@ impl CamPCApp {
             Status::Idle => C_TEXT,
         }
     }
-}
 
-impl eframe::App for CamPCApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Request repaint at ~30 fps so the preview stays live
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
-
-        // Drain channel — only the *latest* frame matters for a live preview
+    fn refresh_preview_texture(&mut self, ctx: &egui::Context) {
+        // Drain all pending frames and keep only the newest one for live preview.
         let mut latest: Option<Vec<u8>> = None;
         while let Ok(frame) = self.preview_rx.try_recv() {
             latest = Some(frame);
         }
         if let Some(frame) = latest {
-            let image = egui::ColorImage::from_rgb(
-                [PREVIEW_W as usize, PREVIEW_H as usize],
-                &frame,
-            );
+            let image = egui::ColorImage::from_rgb([PREVIEW_W as usize, PREVIEW_H as usize], &frame);
             match &mut self.preview_texture {
                 Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
                 None => {
@@ -134,10 +132,9 @@ impl eframe::App for CamPCApp {
                 }
             }
         }
+    }
 
-        let status = self.current_status();
-
-        // ── Header ───────────────────────────────────────────────────────────
+    fn render_header(&self, ctx: &egui::Context, status: &Status) {
         egui::TopBottomPanel::top("header")
             .frame(egui::Frame::none().fill(C_BASE).inner_margin(egui::Margin::symmetric(10.0, 6.0)))
             .show(ctx, |ui| {
@@ -151,19 +148,28 @@ impl eframe::App for CamPCApp {
                     ui.label(
                         egui::RichText::new(status.to_string())
                             .size(11.0)
-                            .color(Self::status_color(&status)),
+                            .color(Self::status_color(status)),
                     );
                 });
             });
+    }
 
-        // ── Controls panel ────────────────────────────────────────────────────
+    fn apply_config_update(&mut self, update: ConfigUpdate) {
+        if !(update.stream_relevant || update.zoom_only) {
+            return;
+        }
+
+        self.config.save();
+        if update.stream_relevant && self.started {
+            self.send(EngineCmd::UpdateConfig(self.config.clone()));
+        }
+    }
+
+    fn render_controls(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("controls")
             .frame(egui::Frame::none().fill(C_MANTLE).inner_margin(egui::Margin::symmetric(10.0, 8.0)))
             .show(ctx, |ui| {
-                // `changed` = engine-relevant setting changed (triggers UpdateConfig).
-                // `zoom_changed` = GUI-only, no need to notify engine.
-                let mut changed = false;
-                let mut zoom_changed = false;
+                let mut update = ConfigUpdate::default();
 
                 // FPS slider
                 ui.horizontal(|ui| {
@@ -171,7 +177,7 @@ impl eframe::App for CamPCApp {
                     ui.add_space(4.0);
                     let resp = ui.add(egui::Slider::new(&mut self.config.fps, 5..=30));
                     if resp.drag_stopped() {
-                        changed = true;
+                        update.stream_relevant = true;
                     }
                 });
 
@@ -186,7 +192,7 @@ impl eframe::App for CamPCApp {
                             .clicked()
                         {
                             self.config.rotation = deg;
-                            changed = true;
+                            update.stream_relevant = true;
                         }
                     }
                 });
@@ -199,7 +205,7 @@ impl eframe::App for CamPCApp {
                         let selected = self.config.connection_mode == mode;
                         if ui.add(selectable_btn(label, selected)).clicked() {
                             self.config.connection_mode = mode;
-                            changed = true;
+                            update.stream_relevant = true;
                         }
                     }
                 });
@@ -222,13 +228,10 @@ impl eframe::App for CamPCApp {
                                 .desired_width(150.0)
                                 .font(egui::FontId::monospace(11.0)),
                         );
-                        // Commit on Enter or focus-loss so we don't spam UpdateConfig.
                         if resp.lost_focus() {
-                            changed = true;
+                            update.stream_relevant = true;
                         }
 
-                        // Show the auto-discovered IP as a non-editable chip when
-                        // no manual override is set.
                         if self.config.wifi_ip.is_empty() {
                             if let Some(ip) = &discovered {
                                 ui.label(
@@ -238,26 +241,23 @@ impl eframe::App for CamPCApp {
                                         .monospace(),
                                 );
                             }
-                        } else {
-                            // Clear button to go back to auto-discover.
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("✕").color(C_OVERLAY).size(10.0),
-                                    )
-                                    .fill(egui::Color32::TRANSPARENT)
-                                    .stroke(egui::Stroke::NONE),
+                        } else if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("✕").color(C_OVERLAY).size(10.0),
                                 )
-                                .clicked()
-                            {
-                                self.config.wifi_ip.clear();
-                                changed = true;
-                            }
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            self.config.wifi_ip.clear();
+                            update.stream_relevant = true;
                         }
                     });
                 }
 
-                // Zoom slider (preview-only — V4L2 output is always 1920×1080)
+                // Zoom slider (preview-only — V4L2 output remains 1280×720)
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Zoom").color(C_TEXT).size(11.0));
                     ui.add_space(4.0);
@@ -267,7 +267,7 @@ impl eframe::App for CamPCApp {
                             .fixed_decimals(1),
                     );
                     if resp.changed() {
-                        zoom_changed = true;
+                        update.zoom_only = true;
                     }
                     if ui
                         .add(
@@ -278,7 +278,7 @@ impl eframe::App for CamPCApp {
                         .clicked()
                     {
                         self.config.zoom = 1.0;
-                        zoom_changed = true;
+                        update.zoom_only = true;
                     }
                 });
 
@@ -296,16 +296,15 @@ impl eframe::App for CamPCApp {
                             self.started = true;
                             self.send(EngineCmd::Start);
                         }
-                    } else {
-                        if ui
-                            .add(action_btn("■  Detener", C_PEACH, egui::Color32::BLACK))
-                            .clicked()
-                        {
-                            self.started = false;
-                            self.preview_texture = None;
-                            self.send(EngineCmd::Stop);
-                        }
+                    } else if ui
+                        .add(action_btn("■  Detener", C_PEACH, egui::Color32::BLACK))
+                        .clicked()
+                    {
+                        self.started = false;
+                        self.preview_texture = None;
+                        self.send(EngineCmd::Stop);
                     }
+
                     ui.add_space(8.0);
                     if ui.add(action_btn("Salir", C_RED, egui::Color32::WHITE)).clicked() {
                         self.send(EngineCmd::Stop);
@@ -313,20 +312,24 @@ impl eframe::App for CamPCApp {
                     }
                 });
 
-                // Notify engine if a streaming-relevant setting changed.
-                if changed {
-                    self.config.save();
-                    if self.started {
-                        self.send(EngineCmd::UpdateConfig(self.config.clone()));
-                    }
-                }
-                // Zoom is GUI-only — just persist it, no engine notification needed.
-                if zoom_changed {
-                    self.config.save();
-                }
+                self.apply_config_update(update);
             });
+    }
 
-        // ── Preview canvas ────────────────────────────────────────────────────
+    fn apply_scroll_zoom(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+        if !ui.rect_contains_pointer(rect) {
+            return;
+        }
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll == 0.0 {
+            return;
+        }
+
+        self.config.zoom = (self.config.zoom * (1.0 + scroll * 0.003)).clamp(1.0, 4.0);
+        self.config.save();
+    }
+
+    fn render_preview_canvas(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
@@ -340,26 +343,14 @@ impl eframe::App for CamPCApp {
                     egui::vec2(w, h),
                 );
 
+                self.apply_scroll_zoom(ui, rect);
                 if let Some(tex) = &self.preview_texture {
-                    // Scroll wheel zooms the preview (clamped 1×–4×).
-                    // Only active when the pointer is over the canvas.
-                    if ui.rect_contains_pointer(rect) {
-                        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                        if scroll != 0.0 {
-                            self.config.zoom =
-                                (self.config.zoom * (1.0 + scroll * 0.003)).clamp(1.0, 4.0);
-                            self.config.save();
-                        }
-                    }
-
-                    // Map zoom factor to a centred UV sub-rect of the texture.
-                    // zoom=1 → full UV [0,0]→[1,1];  zoom=2 → centre quarter, etc.
-                    // The GPU handles the bilinear upscale — zero extra CPU cost.
-                    let s = 1.0 / self.config.zoom;
-                    let m = (1.0 - s) * 0.5; // UV margin on each side
+                    // UV rect stays centered so zoom always targets the middle.
+                    let scale = 1.0 / self.config.zoom;
+                    let margin = (1.0 - scale) * 0.5;
                     let uv = egui::Rect::from_min_max(
-                        egui::pos2(m, m),
-                        egui::pos2(1.0 - m, 1.0 - m),
+                        egui::pos2(margin, margin),
+                        egui::pos2(1.0 - margin, 1.0 - margin),
                     );
                     ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
                 } else {
@@ -377,6 +368,19 @@ impl eframe::App for CamPCApp {
                     );
                 }
             });
+    }
+}
+
+impl eframe::App for CamPCApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request repaint at ~30 fps so the preview stays live
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
+        self.refresh_preview_texture(ctx);
+        let status = self.current_status();
+        self.render_header(ctx, &status);
+        self.render_controls(ctx);
+        self.render_preview_canvas(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -17,6 +17,15 @@ const V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
 const V4L2_FIELD_NONE: u32 = 1;
 // YU12 = planar YUV 4:2:0, same as FFmpeg yuv420p
 const V4L2_PIX_FMT_YUV420: u32 = fourcc(b'Y', b'U', b'1', b'2');
+const V4L2_FMT_UNION_SIZE: usize = 200;
+const V4L2_FORMAT_SIZE: u32 = 208;
+
+const PIX_FMT_OFF_WIDTH: usize = 0;
+const PIX_FMT_OFF_HEIGHT: usize = 4;
+const PIX_FMT_OFF_FORMAT: usize = 8;
+const PIX_FMT_OFF_FIELD: usize = 12;
+const PIX_FMT_OFF_BYTESPERLINE: usize = 16;
+const PIX_FMT_OFF_SIZEIMAGE: usize = 20;
 
 const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
@@ -27,7 +36,7 @@ const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
 const fn iowr(nr_type: u32, nr: u32, size: u32) -> libc::c_ulong {
     ((3u32 << 30) | (size << 16) | (nr_type << 8) | nr) as libc::c_ulong
 }
-const VIDIOC_S_FMT: libc::c_ulong = iowr(b'V' as u32, 5, 208);
+const VIDIOC_S_FMT: libc::c_ulong = iowr(b'V' as u32, 5, V4L2_FORMAT_SIZE);
 
 // ── v4l2_format layout (x86_64 Linux) ────────────────────────────────────────
 // offset  0: __u32 type        (4 bytes)
@@ -48,11 +57,37 @@ const VIDIOC_S_FMT: libc::c_ulong = iowr(b'V' as u32, 5, 208);
 struct V4l2Format {
     buf_type: u32,
     _pad: u32,
-    fmt: [u8; 200],
+    fmt: [u8; V4L2_FMT_UNION_SIZE],
 }
 
 fn write_u32(buf: &mut [u8], offset: usize, val: u32) {
     buf[offset..offset + 4].copy_from_slice(&val.to_ne_bytes());
+}
+
+fn fill_pix_format(fmt: &mut V4l2Format, width: u32, height: u32, bytesperline: u32, sizeimage: u32) {
+    write_u32(&mut fmt.fmt, PIX_FMT_OFF_WIDTH, width);
+    write_u32(&mut fmt.fmt, PIX_FMT_OFF_HEIGHT, height);
+    write_u32(&mut fmt.fmt, PIX_FMT_OFF_FORMAT, V4L2_PIX_FMT_YUV420);
+    write_u32(&mut fmt.fmt, PIX_FMT_OFF_FIELD, V4L2_FIELD_NONE);
+    write_u32(&mut fmt.fmt, PIX_FMT_OFF_BYTESPERLINE, bytesperline);
+    write_u32(&mut fmt.fmt, PIX_FMT_OFF_SIZEIMAGE, sizeimage);
+}
+
+fn try_set_format(file: &File, fmt: &mut V4l2Format, buf_type: u32) -> bool {
+    fmt.buf_type = buf_type;
+    let ret = unsafe {
+        // Safety: `fmt` points to a valid repr(C) struct matching the expected ioctl layout.
+        libc::ioctl(file.as_raw_fd(), VIDIOC_S_FMT, fmt as *mut V4l2Format)
+    };
+    if ret == 0 {
+        return true;
+    }
+
+    eprintln!(
+        "[v4l2] VIDIOC_S_FMT buf_type={buf_type} failed: {}",
+        std::io::Error::last_os_error()
+    );
+    false
 }
 
 // ── Public writer ─────────────────────────────────────────────────────────────
@@ -81,30 +116,21 @@ impl V4l2Writer {
         let bytesperline = width;
         let sizeimage = width * height * 3 / 2;
 
-        let mut fmt = V4l2Format { buf_type: 0, _pad: 0, fmt: [0u8; 200] };
-        write_u32(&mut fmt.fmt, 0, width);
-        write_u32(&mut fmt.fmt, 4, height);
-        write_u32(&mut fmt.fmt, 8, V4L2_PIX_FMT_YUV420);
-        write_u32(&mut fmt.fmt, 12, V4L2_FIELD_NONE);
-        write_u32(&mut fmt.fmt, 16, bytesperline);
-        write_u32(&mut fmt.fmt, 20, sizeimage);
+        let mut fmt = V4l2Format {
+            buf_type: 0,
+            _pad: 0,
+            fmt: [0u8; V4L2_FMT_UNION_SIZE],
+        };
+        fill_pix_format(&mut fmt, width, height, bytesperline, sizeimage);
 
         for &buf_type in &[V4L2_BUF_TYPE_VIDEO_OUTPUT, V4L2_BUF_TYPE_VIDEO_CAPTURE] {
-            fmt.buf_type = buf_type;
-            let ret = unsafe {
-                libc::ioctl(file.as_raw_fd(), VIDIOC_S_FMT, &mut fmt as *mut V4l2Format)
-            };
-            if ret == 0 {
+            if try_set_format(&file, &mut fmt, buf_type) {
                 eprintln!(
                     "[v4l2] device configured: {width}x{height} YUV420 \
                      (buf_type={buf_type})"
                 );
                 return Some(V4l2Writer { file });
             }
-            eprintln!(
-                "[v4l2] VIDIOC_S_FMT buf_type={buf_type} failed: {}",
-                std::io::Error::last_os_error()
-            );
         }
 
         eprintln!("[v4l2] could not configure {device} — is v4l2loopback loaded?");

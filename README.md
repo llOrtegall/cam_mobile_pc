@@ -1,6 +1,6 @@
 # cam-mobile-pc
 
-Use your Android rear camera as a virtual webcam on Linux via USB.
+Use your Android rear camera as a virtual webcam on Linux via USB or WiFi.
 Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 
 ---
@@ -11,15 +11,15 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  ANDROID  (mobile_cam_app/)                                                  │
 │                                                                              │
-│  CameraX  — rear camera, 1920×1080 @ 30 fps (ResolutionSelector)            │
+│  CameraX  — rear camera, 1280×720 @ 30 fps (ResolutionSelector)             │
 │       │ YUV_420_888 frames                                                   │
 │       ▼                                                                      │
 │  CameraStreamer.kt                                                           │
-│       │ converts YUV → NV21 → JPEG (quality 95)                             │
+│       │ converts YUV → NV21 → JPEG (quality 75)                             │
 │       ▼                                                                      │
 │  TcpServer.kt                                                                │
 │       │ wraps each JPEG in MIME multipart (MJPEG)                           │
-│       │ listens on TCP :5000  (TCP_NODELAY, 64 KB send buffer)              │
+│       │ listens on TCP :5000  (TCP_NODELAY, 512 KB send buffer)             │
 └───────┼──────────────────────────────────────────────────────────────────────┘
         │  USB cable
         │  adb forward tcp:5000 tcp:5000  (managed by the Rust app)
@@ -35,7 +35,7 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 │       │   ffmpeg -fflags nobuffer -flags low_delay                          │
 │       │          -probesize 32 -analyzeduration 0                           │
 │       │          -f mpjpeg -i tcp://localhost:5000                           │
-│       │          -vf "crop,scale=1920:1080,setsar=1"                        │
+│       │          -vf "crop,scale=1280:720,setsar=1"                         │
 │       │          -f rawvideo -pix_fmt yuv420p pipe:1                        │
 │    Frame-reader thread (per FFmpeg spawn)                                    │
 │       │ reads yuv420p frames from FFmpeg stdout                             │
@@ -52,8 +52,8 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 
 ## Requirements
 
-- **Android:** 8.0+ (API 26), physical rear camera
-- **Linux:** Ubuntu (uses `v4l2loopback-dkms` via apt)
+- **Android:** 13+ (API 33), physical rear camera
+- **Linux:** Ubuntu (script builds and installs upstream `v4l2loopback`)
 - **USB cable** with data (not charge-only)
 - **USB debugging** enabled on the phone (Developer Options)
 - **Rust toolchain** (`rustup` + `cargo`)
@@ -69,9 +69,9 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 bash linux/setup_ubuntu.sh
 ```
 
-Installs `android-tools-adb`, `v4l2loopback-dkms`, `v4l-utils`, `ffmpeg`. Loads the v4l2loopback kernel module with `exclusive_caps=1` and persists it across reboots.
+Installs system dependencies, builds `v4l2loopback` from upstream source, loads the module with `exclusive_caps=1`, and persists it across reboots.
 
-> After a kernel upgrade, re-run `setup_ubuntu.sh` so DKMS rebuilds the module for the new kernel.
+> After a kernel upgrade, re-run `setup_ubuntu.sh` so `v4l2loopback` is rebuilt for the new kernel.
 
 ### 2. Build the Linux GUI app
 
@@ -132,7 +132,7 @@ Catppuccin Mocha themed egui window with a live **640×360 preview canvas** and 
 
 Status indicator in the header bar: `Detenido` / `Esperando dispositivo…` / `Conectando…` / `● Transmitiendo` / `Error: …`
 
-Config is saved to `~/.config/campc/config.toml` (fps, rotation, v4l2_device, adb_port).
+Config is saved to `~/.config/campc/config.toml` (`fps`, `rotation`, `v4l2_device`, `adb_port`, `preview_fps`, `connection_mode`, `wifi_ip`, `zoom`).
 
 ---
 
@@ -146,8 +146,8 @@ cam-mobile-pc/
 │       │   ├── MainActivity.kt            # UI + permissions + service control
 │       │   ├── CameraStreamingService.kt  # ForegroundService (type: camera)
 │       │   │                              #   LifecycleOwner + WakeLock + TcpServer/CameraStreamer
-│       │   ├── CameraStreamer.kt          # CameraX + YUV→NV21→JPEG (quality 95)
-│       │   │                              #   ResolutionSelector → 1920×1080, FALLBACK_RULE_CLOSEST_LOWER
+│       │   ├── CameraStreamer.kt          # CameraX + YUV→NV21→JPEG (quality 75)
+│       │   │                              #   ResolutionSelector → 1280×720, FALLBACK_RULE_CLOSEST_LOWER
 │       │   └── TcpServer.kt              # TCP server :5000, MJPEG framing, TCP_NODELAY
 │       ├── res/layout/activity_main.xml
 │       └── AndroidManifest.xml
@@ -157,7 +157,7 @@ cam-mobile-pc/
         ├── main.rs     # egui App (CamPCApp), preview canvas, theme, on_exit cleanup
         ├── engine.rs   # State machine thread: ADB poll → FFmpeg spawn/health/respawn
         ├── ffmpeg.rs   # build_vf_filter(), spawn_ffmpeg(), frame reader thread, YUV→RGB preview
-        ├── v4l2.rs     # V4l2Writer: VIDIOC_S_FMT (CAPTURE buf_type) + write() per frame
+        ├── v4l2.rs     # V4l2Writer: VIDIOC_S_FMT (OUTPUT first, CAPTURE fallback) + write()
         ├── adb.rs      # device_connected(), forward(), remove_forward()
         └── config.rs   # Config struct, TOML load/save → ~/.config/campc/config.toml
 ```
@@ -172,7 +172,7 @@ CameraX delivers `YUV_420_888`. To compress with `YuvImage` the format must be `
 
 1. **Y plane** — copied directly (full luminance), row-stride-aware.
 2. **UV plane** — interleaved as VU (NV21 order), taking `uvPixelStride` into account.
-3. `YuvImage.compressToJpeg()` at quality **95** (~10–20 Mbps depending on content).
+3. `YuvImage.compressToJpeg()` at quality **75** (bandwidth depends on content).
 
 ### MJPEG over TCP
 
@@ -195,7 +195,7 @@ FFmpeg reads this with `-f mpjpeg`.
 
 ```
 crop=iw:iw*9/16:0:(ih-iw*9/16)/2    → crop to 16:9 (phone may send wider frames)
-scale=1920:1080:in_range=full:out_range=limited  → rescale + JPEG full-range → TV limited-range
+scale=1280:720:in_range=full:out_range=limited   → rescale + JPEG full-range → TV limited-range
 setsar=1                              → enforce square pixels
 ```
 
@@ -203,7 +203,7 @@ Rotation prepends `transpose=1` (90° CW) / `hflip,vflip` (180°) / `transpose=2
 
 ### V4L2 output (Rust, bypassing FFmpeg muxer)
 
-`v4l2loopback` with `exclusive_caps=1` only advertises `V4L2_CAP_VIDEO_CAPTURE`. Using `VIDIOC_S_FMT` with `V4L2_BUF_TYPE_VIDEO_OUTPUT` returns EINVAL. The Rust `V4l2Writer` uses **`V4L2_BUF_TYPE_VIDEO_CAPTURE=1`** for the ioctl, then writes raw yuv420p frames directly via `write()`. This works reliably on kernel 6.x where FFmpeg's built-in v4l2 muxer fails.
+The Rust `V4l2Writer` tries `VIDIOC_S_FMT` with `V4L2_BUF_TYPE_VIDEO_OUTPUT=2` first (newer v4l2loopback), then falls back to `V4L2_BUF_TYPE_VIDEO_CAPTURE=1` for older kernels/modules. After format setup, frames are written directly via `write()`.
 
 ---
 
@@ -215,11 +215,11 @@ Rotation prepends `transpose=1` (90° CW) / `hflip,vflip` (180°) / `transpose=2
 | `[v4l2] VIDIOC_S_FMT failed: Invalid argument` | Wrong buf_type or module not loaded | Confirm `exclusive_caps=1` module is loaded; `lsmod \| grep v4l2loopback` |
 | `[v4l2] device unavailable — preview only` | `/dev/video10` doesn't exist | Run `setup_ubuntu.sh`; or `sudo modprobe v4l2loopback exclusive_caps=1` |
 | FFmpeg exits immediately | Phone app not streaming yet | Start the Android app first; wait for "Waiting for connection…" notification |
-| `speed=0.675x` in FFmpeg logs | Camera in 4:3 sensor mode (1920×1440) → ~20fps | `FALLBACK_RULE_CLOSEST_LOWER` in `CameraStreamer.kt` should force 16:9 mode |
+| `speed<1.0x` in FFmpeg logs | Camera selected a 4:3 mode (for example 1280×960 / 1920×1440) | Keep `FALLBACK_RULE_CLOSEST_LOWER` to prefer 16:9 capture modes |
 | Preview looks pixelated | Window too small relative to preview texture | Resize the window larger; preview texture is 640×360 |
 | High latency | TCP buffering or USB cable | `-probesize 32 -analyzeduration 0` flags already applied; try a better cable |
 | ADB forward fails | USB debugging not enabled | Enable Developer Options → USB debugging on the phone |
-| Module missing after kernel upgrade | DKMS needs rebuild | Re-run `bash linux/setup_ubuntu.sh` |
+| Module missing after kernel upgrade | v4l2loopback needs rebuild | Re-run `bash linux/setup_ubuntu.sh` |
 
 ---
 
@@ -242,8 +242,8 @@ fuser /dev/video10                   # check which process owns the device
 | Video protocol | MJPEG (MIME multipart) | Each frame is independent; FFmpeg reads natively; resilient to packet loss |
 | Transport | ADB forward over USB | No network config; low stable latency; works anywhere |
 | Virtual device | v4l2loopback `exclusive_caps=1` | Zoom/Meet/Teams require this flag to recognise the device as a capture camera |
-| Android encoding | CameraX + YuvImage JPEG 95 | Simple pipeline; `STRATEGY_KEEP_ONLY_LATEST` prevents backpressure/OOM |
+| Android encoding | CameraX + YuvImage JPEG 75 | Simple pipeline; `STRATEGY_KEEP_ONLY_LATEST` prevents backpressure/OOM |
 | Linux app | Rust + egui + FFmpeg subprocess | Native performance; GPU preview; no Python runtime dependency |
-| V4L2 write | Rust ioctls (CAPTURE buf_type) + write() | FFmpeg v4l2 muxer fails on kernel 6.x with `exclusive_caps=1`; CAPTURE type accepted |
+| V4L2 write | Rust ioctls (OUTPUT first, CAPTURE fallback) + write() | Works across old/new v4l2loopback behaviour on different kernels |
 | Preview | 640×360 yuv→rgb in frame-reader thread | Decoded in background; main thread only uploads texture to GPU |
-| Resolution | 1920×1080 fixed output | Maximum quality; crop filter handles non-16:9 phone sensors |
+| Resolution | 1280×720 fixed output | Lower latency/bandwidth while preserving 16:9 compatibility |

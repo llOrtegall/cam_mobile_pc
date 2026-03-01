@@ -20,7 +20,7 @@ pub struct Config {
     /// Manual WiFi IP override. Empty string = auto-discover via UDP beacon.
     pub wifi_ip: String,
     /// Preview zoom factor (1.0 = fit-to-canvas, up to 4.0).
-    /// Purely a GUI setting — V4L2 output is always full 1920×1080.
+    /// Purely a GUI setting — V4L2 output is always fixed 1280×720.
     pub zoom: f32,
 }
 

@@ -28,6 +28,10 @@ class TcpServer(
                 .toByteArray(Charsets.US_ASCII)
         private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
         private val FRAME_SUFFIX = "\r\n".toByteArray(Charsets.US_ASCII)
+
+        private const val CLIENT_BUFFER_BYTES = 524288
+        private const val DISCONNECT_POLL_MS = 200L
+        private const val RECONNECT_DELAY_MS = 500L
     }
 
     // Guards both `outputStream` and `currentClient` so that sendFrame and
@@ -48,31 +52,16 @@ class TcpServer(
                 Log.i(TAG, "TCP server listening on port $port")
 
                 while (isActive) {
-                    val client = try {
-                        serverSocket?.accept() ?: break
-                    } catch (e: IOException) {
-                        if (isActive) Log.w(TAG, "Accept failed: ${e.message}")
-                        break
-                    }
-
-                    Log.i(TAG, "Client connected: ${client.inetAddress}")
-                    client.tcpNoDelay = true
-                    client.sendBufferSize = 524288
-                    synchronized(streamLock) {
-                        currentClient = client
-                        outputStream = BufferedOutputStream(client.getOutputStream(), 524288)
-                    }
+                    val client = acceptClient() ?: break
+                    configureClient(client)
                     onClientConnected()
 
-                    // Wait until client disconnects (sendFrame will null outputStream on error).
-                    while (isActive && synchronized(streamLock) { outputStream } != null) {
-                        delay(200)
-                    }
+                    waitForClientDisconnect()
 
                     closeClient()
                     onClientDisconnected()
                     Log.i(TAG, "Client disconnected, waiting for new connection")
-                    delay(500)
+                    delay(RECONNECT_DELAY_MS)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Server error: ${e.message}")
@@ -86,7 +75,8 @@ class TcpServer(
         synchronized(streamLock) {
             val stream = outputStream ?: return
             try {
-                // Header uses pre-computed byte arrays — only Content-Length varies.
+                // Full frame write is atomic with respect to closeClient under streamLock.
+                // Header bytes are precomputed; only Content-Length is generated per frame.
                 stream.write(FRAME_PREFIX)
                 stream.write(jpegBytes.size.toString().toByteArray(Charsets.US_ASCII))
                 stream.write(HEADER_END)
@@ -104,6 +94,36 @@ class TcpServer(
         acceptJob?.cancel()
         closeAll()
     }
+
+    private fun acceptClient(): Socket? {
+        return try {
+            serverSocket?.accept()
+        } catch (e: IOException) {
+            if (acceptJob?.isActive == true) {
+                Log.w(TAG, "Accept failed: ${e.message}")
+            }
+            null
+        }
+    }
+
+    private fun configureClient(client: Socket) {
+        Log.i(TAG, "Client connected: ${client.inetAddress}")
+        client.tcpNoDelay = true
+        client.sendBufferSize = CLIENT_BUFFER_BYTES
+        synchronized(streamLock) {
+            currentClient = client
+            outputStream = BufferedOutputStream(client.getOutputStream(), CLIENT_BUFFER_BYTES)
+        }
+    }
+
+    private suspend fun waitForClientDisconnect() {
+        while (acceptJob?.isActive == true && isClientActive()) {
+            delay(DISCONNECT_POLL_MS)
+        }
+    }
+
+    private fun isClientActive(): Boolean =
+        synchronized(streamLock) { outputStream != null }
 
     private fun closeClient() {
         val clientToClose = synchronized(streamLock) {
