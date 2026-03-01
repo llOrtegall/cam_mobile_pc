@@ -43,7 +43,7 @@ class CameraStreamer(
             .setResolutionStrategy(
                 ResolutionStrategy(
                     Size(1920, 1080),
-                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER
                 )
             )
             .build()

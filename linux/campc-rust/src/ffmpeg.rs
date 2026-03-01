@@ -42,7 +42,7 @@ pub fn build_vf_filter(cfg: &Config) -> String {
     // out_range=limited — standard TV range expected by V4L2 consumers (Y 16-235)
     // flags=lanczos   — higher-quality resampling vs. default bilinear
     steps.push(format!(
-        "scale={OUTPUT_W}:{OUTPUT_H}:in_range=full:out_range=limited:flags=lanczos"
+        "scale={OUTPUT_W}:{OUTPUT_H}:in_range=full:out_range=limited"
     ));
 
     // 4. Ensure square pixels (SAR 1:1) so consuming apps display correctly.
