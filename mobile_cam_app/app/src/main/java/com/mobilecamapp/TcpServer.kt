@@ -19,13 +19,22 @@ class TcpServer(
 ) {
     companion object {
         private const val TAG = "TcpServer"
-        private const val BOUNDARY = "frame"
+
+        // Pre-computed static parts of the MJPEG frame header to avoid
+        // allocating a new String + ByteArray on every frame.
+        private val FRAME_PREFIX =
+            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                .toByteArray(Charsets.US_ASCII)
+        private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
+        private val FRAME_SUFFIX = "\r\n".toByteArray(Charsets.US_ASCII)
     }
 
-    @Volatile
-    private var outputStream: OutputStream? = null
+    // Guards both `outputStream` and `currentClient` so that sendFrame and
+    // closeClient never race: either sendFrame writes a complete frame or
+    // closeClient nulls the stream — never both at the same time.
+    private val streamLock = Any()
 
-    @Volatile
+    private var outputStream: OutputStream? = null
     private var currentClient: Socket? = null
 
     private var serverSocket: ServerSocket? = null
@@ -46,14 +55,16 @@ class TcpServer(
                     }
 
                     Log.i(TAG, "Client connected: ${client.inetAddress}")
-                    currentClient = client
                     client.tcpNoDelay = true
                     client.sendBufferSize = 65536
-                    outputStream = client.getOutputStream()
+                    synchronized(streamLock) {
+                        currentClient = client
+                        outputStream = client.getOutputStream()
+                    }
                     onClientConnected()
 
-                    // Wait until client disconnects (sendFrame will set outputStream=null on error)
-                    while (isActive && outputStream != null) {
+                    // Wait until client disconnects (sendFrame will null outputStream on error).
+                    while (isActive && synchronized(streamLock) { outputStream } != null) {
                         delay(200)
                     }
 
@@ -71,18 +82,20 @@ class TcpServer(
     }
 
     fun sendFrame(jpegBytes: ByteArray) {
-        val stream = outputStream ?: return
-        try {
-            val header = "--$BOUNDARY\r\n" +
-                "Content-Type: image/jpeg\r\n" +
-                "Content-Length: ${jpegBytes.size}\r\n\r\n"
-            stream.write(header.toByteArray(Charsets.US_ASCII))
-            stream.write(jpegBytes)
-            stream.write("\r\n".toByteArray(Charsets.US_ASCII))
-            stream.flush()
-        } catch (e: IOException) {
-            Log.w(TAG, "Send failed, client likely disconnected: ${e.message}")
-            outputStream = null
+        synchronized(streamLock) {
+            val stream = outputStream ?: return
+            try {
+                // Header uses pre-computed byte arrays — only Content-Length varies.
+                stream.write(FRAME_PREFIX)
+                stream.write(jpegBytes.size.toString().toByteArray(Charsets.US_ASCII))
+                stream.write(HEADER_END)
+                stream.write(jpegBytes)
+                stream.write(FRAME_SUFFIX)
+                stream.flush()
+            } catch (e: IOException) {
+                Log.w(TAG, "Send failed, client likely disconnected: ${e.message}")
+                outputStream = null
+            }
         }
     }
 
@@ -92,9 +105,13 @@ class TcpServer(
     }
 
     private fun closeClient() {
-        outputStream = null
-        try { currentClient?.close() } catch (_: IOException) {}
-        currentClient = null
+        val clientToClose = synchronized(streamLock) {
+            outputStream = null
+            val c = currentClient
+            currentClient = null
+            c
+        }
+        try { clientToClose?.close() } catch (_: IOException) {}
     }
 
     private fun closeAll() {

@@ -1,5 +1,5 @@
 use std::process::Child;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,7 +49,7 @@ pub struct AppState {
 pub fn spawn(
     state: Arc<Mutex<AppState>>,
     cmd_rx: Receiver<EngineCmd>,
-    preview_tx: Sender<Vec<u8>>,
+    preview_tx: SyncSender<Vec<u8>>,
     initial_config: Config,
     // Shared PID of the current FFmpeg process. on_exit() reads this to kill
     // FFmpeg synchronously even if the engine thread is sleeping.
@@ -101,7 +101,7 @@ fn resolve_wifi_ip(
 fn run(
     state: Arc<Mutex<AppState>>,
     cmd_rx: Receiver<EngineCmd>,
-    preview_tx: Sender<Vec<u8>>,
+    preview_tx: SyncSender<Vec<u8>>,
     initial_config: Config,
     ffmpeg_pid: Arc<Mutex<Option<u32>>>,
     discovered: Arc<Mutex<Option<discovery::DiscoveredDevice>>>,
@@ -121,11 +121,13 @@ fn run(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 EngineCmd::Start => {
+                    eprintln!("[engine] Start → WaitingDevice");
                     active = true;
                     last_check = Instant::now() - Duration::from_secs(60);
                     set_status(&state, Status::WaitingDevice);
                 }
                 EngineCmd::Stop => {
+                    eprintln!("[engine] Stop → Idle");
                     active = false;
                     ffmpeg::kill(&mut ffmpeg_proc);
                     store_pid(&ffmpeg_pid, None);
@@ -172,12 +174,16 @@ fn run(
                         let connected = adb::device_connected();
 
                         if connected && !device_ready {
+                            eprintln!("[engine] USB device detected, setting up ADB forward :{}", config.adb_port);
                             if adb::forward(config.adb_port) {
+                                eprintln!("[engine] ADB forward ok → Connecting");
                                 device_ready = true;
                             } else {
+                                eprintln!("[engine] ADB forward failed → Error");
                                 set_status(&state, Status::Error("ADB forward falló".to_string()));
                             }
                         } else if !connected && device_ready {
+                            eprintln!("[engine] USB device lost → WaitingDevice");
                             ffmpeg::kill(&mut ffmpeg_proc);
                             store_pid(&ffmpeg_pid, None);
                             adb::remove_forward(config.adb_port);
@@ -197,11 +203,13 @@ fn run(
 
                         match target {
                             Some(ip) if !device_ready => {
+                                eprintln!("[engine] WiFi device ready at {ip} → Connecting");
                                 wifi_target_ip = Some(ip);
                                 device_ready = true;
                             }
                             None if device_ready => {
                                 // Beacon timed out and no manual IP — stop streaming.
+                                eprintln!("[engine] WiFi beacon lost → WaitingDevice");
                                 ffmpeg::kill(&mut ffmpeg_proc);
                                 store_pid(&ffmpeg_pid, None);
                                 wifi_target_ip = None;
@@ -226,6 +234,7 @@ fn run(
 
                 if ffmpeg_exited {
                     if ffmpeg_proc.is_some() {
+                        eprintln!("[engine] FFmpeg exited, respawning in 500 ms…");
                         ffmpeg::kill(&mut ffmpeg_proc);
                         store_pid(&ffmpeg_pid, None);
                         set_status(&state, Status::Connecting);
@@ -242,13 +251,16 @@ fn run(
                         ),
                     };
 
+                    eprintln!("[engine] Spawning FFmpeg → tcp://{}:{}", host, port);
                     match ffmpeg::spawn_ffmpeg(&config, &host, port, preview_tx.clone()) {
                         Some((proc, pid)) => {
+                            eprintln!("[engine] FFmpeg spawned (pid={pid}) → Streaming");
                             store_pid(&ffmpeg_pid, Some(pid));
                             ffmpeg_proc = Some(proc);
                             set_status(&state, Status::Streaming);
                         }
                         None => {
+                            eprintln!("[engine] FFmpeg spawn failed → Error (retry in 2 s)");
                             store_pid(&ffmpeg_pid, None);
                             set_status(
                                 &state,

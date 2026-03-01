@@ -56,7 +56,10 @@ impl CamPCApp {
             discovered_ip: None,
         }));
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>();
-        let (preview_tx, preview_rx) = mpsc::channel::<Vec<u8>>();
+        // Bounded channel: holds at most 2 preview frames. If the GUI is
+        // temporarily slow, the frame reader drops the oldest frame via
+        // try_send instead of growing the buffer unboundedly.
+        let (preview_tx, preview_rx) = mpsc::sync_channel::<Vec<u8>>(2);
         let ffmpeg_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
         let discovered = discovery::start_listener();
 
@@ -157,7 +160,10 @@ impl eframe::App for CamPCApp {
         egui::TopBottomPanel::bottom("controls")
             .frame(egui::Frame::none().fill(C_MANTLE).inner_margin(egui::Margin::symmetric(10.0, 8.0)))
             .show(ctx, |ui| {
+                // `changed` = engine-relevant setting changed (triggers UpdateConfig).
+                // `zoom_changed` = GUI-only, no need to notify engine.
                 let mut changed = false;
+                let mut zoom_changed = false;
 
                 // FPS slider
                 ui.horizontal(|ui| {
@@ -251,6 +257,31 @@ impl eframe::App for CamPCApp {
                     });
                 }
 
+                // Zoom slider (preview-only — V4L2 output is always 1920×1080)
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Zoom").color(C_TEXT).size(11.0));
+                    ui.add_space(4.0);
+                    let resp = ui.add(
+                        egui::Slider::new(&mut self.config.zoom, 1.0..=4.0)
+                            .step_by(0.1)
+                            .fixed_decimals(1),
+                    );
+                    if resp.changed() {
+                        zoom_changed = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("1×").color(C_OVERLAY).size(10.0))
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        self.config.zoom = 1.0;
+                        zoom_changed = true;
+                    }
+                });
+
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -282,12 +313,16 @@ impl eframe::App for CamPCApp {
                     }
                 });
 
-                // Send updated config to engine if anything changed
+                // Notify engine if a streaming-relevant setting changed.
                 if changed {
                     self.config.save();
                     if self.started {
                         self.send(EngineCmd::UpdateConfig(self.config.clone()));
                     }
+                }
+                // Zoom is GUI-only — just persist it, no engine notification needed.
+                if zoom_changed {
+                    self.config.save();
                 }
             });
 
@@ -306,12 +341,27 @@ impl eframe::App for CamPCApp {
                 );
 
                 if let Some(tex) = &self.preview_texture {
-                    ui.painter().image(
-                        tex.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
+                    // Scroll wheel zooms the preview (clamped 1×–4×).
+                    // Only active when the pointer is over the canvas.
+                    if ui.rect_contains_pointer(rect) {
+                        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll != 0.0 {
+                            self.config.zoom =
+                                (self.config.zoom * (1.0 + scroll * 0.003)).clamp(1.0, 4.0);
+                            self.config.save();
+                        }
+                    }
+
+                    // Map zoom factor to a centred UV sub-rect of the texture.
+                    // zoom=1 → full UV [0,0]→[1,1];  zoom=2 → centre quarter, etc.
+                    // The GPU handles the bilinear upscale — zero extra CPU cost.
+                    let s = 1.0 / self.config.zoom;
+                    let m = (1.0 - s) * 0.5; // UV margin on each side
+                    let uv = egui::Rect::from_min_max(
+                        egui::pos2(m, m),
+                        egui::pos2(1.0 - m, 1.0 - m),
                     );
+                    ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
                 } else {
                     let msg = if self.started {
                         "Esperando stream del teléfono…"
