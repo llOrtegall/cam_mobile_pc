@@ -15,8 +15,15 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 
 class CameraStreamingService : Service(), LifecycleOwner {
 
@@ -29,12 +36,17 @@ class CameraStreamingService : Service(), LifecycleOwner {
 
         const val ACTION_START = "com.mobilecamapp.ACTION_START"
         const val ACTION_STOP = "com.mobilecamapp.ACTION_STOP"
+
+        private const val BEACON_PORT = 5001
+        private const val BEACON_MSG = "CAMPC_HELLO"
+        private const val BEACON_INTERVAL_MS = 2000L
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var tcpServer: TcpServer? = null
     private var cameraStreamer: CameraStreamer? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var beaconJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,7 +92,40 @@ class CameraStreamingService : Service(), LifecycleOwner {
         cameraStreamer = streamer
         streamer.start(this, applicationContext)
 
+        startBeacon(serviceScope)
+
         Log.i(TAG, "Streaming service started")
+    }
+
+    /**
+     * Broadcasts a UDP beacon every 2 s so the Rust app can discover this
+     * device on the local network without requiring ADB/USB.
+     *
+     * The Rust side listens on port 5001 and reads the source IP from the
+     * received packet — no payload metadata needed beyond the sentinel string.
+     */
+    private fun startBeacon(scope: CoroutineScope) {
+        beaconJob = scope.launch(Dispatchers.IO) {
+            try {
+                DatagramSocket().use { socket ->
+                    socket.broadcast = true
+                    val msg = BEACON_MSG.toByteArray(Charsets.US_ASCII)
+                    val broadcast = InetAddress.getByName("255.255.255.255")
+                    val packet = DatagramPacket(msg, msg.size, broadcast, BEACON_PORT)
+                    Log.i(TAG, "UDP beacon started → 255.255.255.255:$BEACON_PORT")
+                    while (isActive) {
+                        try {
+                            socket.send(packet)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Beacon send failed: ${e.message}")
+                        }
+                        delay(BEACON_INTERVAL_MS)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Beacon error: ${e.message}")
+            }
+        }
     }
 
     private fun stopSelfAndCleanup() {
@@ -90,6 +135,8 @@ class CameraStreamingService : Service(), LifecycleOwner {
     }
 
     private fun cleanup() {
+        beaconJob?.cancel()
+        beaconJob = null
         cameraStreamer?.stop()
         tcpServer?.stop()
         cameraStreamer = null

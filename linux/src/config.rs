@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionMode {
+    #[default]
+    Wifi,
+    Usb,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Config {
     pub fps: u32,
@@ -8,6 +16,9 @@ pub struct Config {
     pub v4l2_device: String,
     pub adb_port: u16,
     pub preview_fps: u32,
+    pub connection_mode: ConnectionMode,
+    /// Manual WiFi IP override. Empty string = auto-discover via UDP beacon.
+    pub wifi_ip: String,
 }
 
 impl Default for Config {
@@ -18,6 +29,8 @@ impl Default for Config {
             v4l2_device: "/dev/video10".to_string(),
             adb_port: 5000,
             preview_fps: 15,
+            connection_mode: ConnectionMode::Wifi,
+            wifi_ip: String::new(),
         }
     }
 }

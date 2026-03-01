@@ -53,13 +53,17 @@ pub fn build_vf_filter(cfg: &Config) -> String {
 
 /// Spawns FFmpeg and returns (Child, pid), or None on failure.
 ///
+/// `tcp_host` and `tcp_port` identify the MJPEG source:
+///   - USB mode: `("localhost", adb_port)` — tunnelled through ADB forward.
+///   - WiFi mode: `("192.168.x.x", 5000)` — direct connection to the phone.
+///
 /// FFmpeg outputs a single rawvideo yuv420p stream to stdout.
 /// A reader thread reads frames, writes them to the V4L2 device via Rust
 /// ioctls (bypassing FFmpeg's v4l2 muxer which fails on kernel 6.17), and
 /// generates downscaled RGB24 previews for the GUI.
-pub fn spawn_ffmpeg(cfg: &Config, preview_tx: Sender<Vec<u8>>) -> Option<(Child, u32)> {
+pub fn spawn_ffmpeg(cfg: &Config, tcp_host: &str, tcp_port: u16, preview_tx: Sender<Vec<u8>>) -> Option<(Child, u32)> {
     let vf = build_vf_filter(cfg);
-    let tcp_url = format!("tcp://localhost:{}", cfg.adb_port);
+    let tcp_url = format!("tcp://{}:{}", tcp_host, tcp_port);
     let fps_str = cfg.fps.to_string();
     let device = cfg.v4l2_device.clone();
     let (out_w, out_h) = (OUTPUT_W, OUTPUT_H);

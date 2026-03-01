@@ -1,5 +1,6 @@
 mod adb;
 mod config;
+mod discovery;
 mod engine;
 mod ffmpeg;
 mod v4l2;
@@ -9,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use config::Config;
+use config::{Config, ConnectionMode};
 use engine::{AppState, EngineCmd, Status};
 use ffmpeg::{PREVIEW_H, PREVIEW_W};
 
@@ -23,6 +24,7 @@ const C_YELLOW: egui::Color32 = egui::Color32::from_rgb(249, 226, 175); // #f9e2
 const C_RED: egui::Color32 = egui::Color32::from_rgb(243, 139, 168);   // #f38ba8
 const C_PEACH: egui::Color32 = egui::Color32::from_rgb(250, 179, 135); // #fab387
 const C_OVERLAY: egui::Color32 = egui::Color32::from_rgb(108, 112, 134); // #6c7086
+const C_BLUE: egui::Color32 = egui::Color32::from_rgb(137, 180, 250);  // #89b4fa
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -51,10 +53,12 @@ impl CamPCApp {
         let config = Config::load();
         let state = Arc::new(Mutex::new(AppState {
             status: Status::Idle,
+            discovered_ip: None,
         }));
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>();
         let (preview_tx, preview_rx) = mpsc::channel::<Vec<u8>>();
         let ffmpeg_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+        let discovered = discovery::start_listener();
 
         engine::spawn(
             Arc::clone(&state),
@@ -62,6 +66,7 @@ impl CamPCApp {
             preview_tx,
             config.clone(),
             Arc::clone(&ffmpeg_pid),
+            discovered,
         );
 
         Self {
@@ -84,6 +89,10 @@ impl CamPCApp {
             .lock()
             .map(|s| s.status.clone())
             .unwrap_or(Status::Idle)
+    }
+
+    fn current_discovered_ip(&self) -> Option<String> {
+        self.state.lock().ok()?.discovered_ip.clone()
     }
 
     fn status_color(s: &Status) -> egui::Color32 {
@@ -176,6 +185,72 @@ impl eframe::App for CamPCApp {
                     }
                 });
 
+                // Connection mode toggle
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Conexión").color(C_TEXT).size(11.0));
+                    ui.add_space(4.0);
+                    for (label, mode) in [("WiFi", ConnectionMode::Wifi), ("USB", ConnectionMode::Usb)] {
+                        let selected = self.config.connection_mode == mode;
+                        if ui.add(selectable_btn(label, selected)).clicked() {
+                            self.config.connection_mode = mode;
+                            changed = true;
+                        }
+                    }
+                });
+
+                // WiFi IP row (only in WiFi mode)
+                if self.config.connection_mode == ConnectionMode::Wifi {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("IP:").color(C_TEXT).size(11.0));
+                        ui.add_space(4.0);
+
+                        let discovered = self.current_discovered_ip();
+                        let hint = match &discovered {
+                            Some(ip) => format!("{ip}  (auto)"),
+                            None => "Buscando…".to_string(),
+                        };
+
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.config.wifi_ip)
+                                .hint_text(&hint)
+                                .desired_width(150.0)
+                                .font(egui::FontId::monospace(11.0)),
+                        );
+                        // Commit on Enter or focus-loss so we don't spam UpdateConfig.
+                        if resp.lost_focus() {
+                            changed = true;
+                        }
+
+                        // Show the auto-discovered IP as a non-editable chip when
+                        // no manual override is set.
+                        if self.config.wifi_ip.is_empty() {
+                            if let Some(ip) = &discovered {
+                                ui.label(
+                                    egui::RichText::new(ip)
+                                        .color(C_BLUE)
+                                        .size(11.0)
+                                        .monospace(),
+                                );
+                            }
+                        } else {
+                            // Clear button to go back to auto-discover.
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("✕").color(C_OVERLAY).size(10.0),
+                                    )
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::NONE),
+                                )
+                                .clicked()
+                            {
+                                self.config.wifi_ip.clear();
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -266,8 +341,10 @@ impl eframe::App for CamPCApp {
             }
         }
 
-        // Remove ADB forward synchronously so the next session starts clean.
-        adb::remove_forward(self.config.adb_port);
+        // ADB forward cleanup is only needed in USB mode.
+        if self.config.connection_mode == ConnectionMode::Usb {
+            adb::remove_forward(self.config.adb_port);
+        }
 
         self.config.save();
     }
@@ -275,7 +352,7 @@ impl eframe::App for CamPCApp {
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
 
-/// Small pill-style button used for rotation and resolution selectors.
+/// Small pill-style button used for rotation and mode selectors.
 fn selectable_btn(label: &str, selected: bool) -> impl egui::Widget + '_ {
     move |ui: &mut egui::Ui| {
         let bg = if selected { C_SURFACE0 } else { C_MANTLE };
@@ -326,7 +403,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("CamPC")
             .with_inner_size([680.0, 540.0])
-            .with_min_inner_size([480.0, 380.0]),
+            .with_min_inner_size([480.0, 420.0]),
         ..Default::default()
     };
 
