@@ -2,6 +2,7 @@ mod adb;
 mod config;
 mod engine;
 mod ffmpeg;
+mod v4l2;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
