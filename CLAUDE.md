@@ -4,87 +4,117 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-**cam-mobile-pc** streams the Android rear camera to a Linux PC as a virtual V4L2 webcam over USB (via ADB forward). The full pipeline:
+**cam-mobile-pc** streams the Android rear camera to a Linux PC as a virtual V4L2 webcam over USB (via ADB forward). Full pipeline:
 
 ```
-Android CameraX (YUV_420_888) → NV21 → JPEG (quality 75) → MJPEG over TCP :5000
-  → ADB forward (USB) → campc.py (OpenCV + pyfakewebcam) → /dev/video10 (v4l2loopback "AndroidCam")
+Android CameraX (1920×1080, YUV_420_888) → NV21 → JPEG (quality 95) → MJPEG over TCP :5000
+  → ADB forward (USB) → FFmpeg subprocess → yuv420p pipe → Rust V4l2Writer → /dev/video10
+                                                          → RGB24 640×360 preview → egui GPU texture
 ```
 
-The Linux side is a **Python/Tkinter GUI app** (`campc.py`) — no ffmpeg required for normal use.
-Target platform: **Ubuntu** (uses `v4l2loopback-dkms` via apt, not akmod/RPM Fusion).
+The Linux side is a **Rust/egui app** (`linux/` is the Cargo crate root). FFmpeg is a subprocess.
+Target platform: **Ubuntu** (`v4l2loopback-dkms` via apt).
 
 ## Commands
 
-### Android app
+### Build — Linux (Rust)
 
 ```bash
-# Build debug APK
-cd android
-./gradlew assembleDebug
+~/.cargo/bin/cargo build --release --manifest-path linux/Cargo.toml
+./linux/target/release/campc
+```
 
-# Install on connected device
+### Build — Android
+
+```bash
+cd mobile_cam_app
+./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 
-# Build and install in one step
+# or build + install in one step:
 ./gradlew installDebug
 ```
 
-### Linux PC (Ubuntu)
+### One-time Ubuntu setup
 
 ```bash
-# One-time setup (installs adb, v4l2loopback-dkms, Python deps; creates /dev/video10)
-bash linux/setup_ubuntu.sh
-
-# Daily use: launch the GUI app (handles ADB forward internally)
-python3 linux/campc.py
+bash linux/setup_ubuntu.sh   # installs adb, v4l2loopback-dkms, ffmpeg, persists module
 ```
 
 ### Verification
 
 ```bash
-lsmod | grep v4l2loopback          # confirm module is loaded
-v4l2-ctl --list-devices             # confirm /dev/video10 "AndroidCam" exists
-nc localhost 5000 | head -c 300    # inspect raw MJPEG stream from phone
-fuser /dev/video10                  # check which process owns the device
+lsmod | grep v4l2loopback
+v4l2-ctl --list-devices
+cat /sys/module/v4l2loopback/parameters/exclusive_caps   # must be 1
+nc localhost 5000 | head -c 300    # inspect raw MJPEG while phone is streaming
+fuser /dev/video10
 ```
 
 ## Architecture
 
-The project has two independent components:
+### Android (`mobile_cam_app/app/src/main/java/com/mobilecamapp/`)
 
-### Android (`android/app/src/main/java/com/campc/`)
+- **`MainActivity.kt`** — Single-activity UI. Requests CAMERA + POST_NOTIFICATIONS permissions; starts/stops `CameraStreamingService` via Intent with `ACTION_START`/`ACTION_STOP`.
 
-- **`MainActivity.kt`** — Single-activity UI. Requests CAMERA and POST_NOTIFICATIONS permissions, then starts/stops `CameraStreamingService` via explicit Intent with `ACTION_START`/`ACTION_STOP`.
+- **`CameraStreamingService.kt`** — `ForegroundService` (`foregroundServiceType="camera"`). Implements `LifecycleOwner` itself (so CameraX stays bound when Activity is gone). Holds `PARTIAL_WAKE_LOCK`. Orchestrates `TcpServer` + `CameraStreamer`. Persistent notification with Stop button.
 
-- **`CameraStreamingService.kt`** — `ForegroundService` with `foregroundServiceType="camera"` (required by Android API 34+). Orchestrates `TcpServer` + `CameraStreamer`. Manages lifecycle with a `CoroutineScope(Dispatchers.Main + SupervisorJob())`. Shows a persistent notification with a Stop action button.
+- **`CameraStreamer.kt`** — Binds CameraX `ImageAnalysis`. Uses `ResolutionSelector` with `ResolutionStrategy(Size(1920,1080), FALLBACK_RULE_CLOSEST_LOWER)` — **CLOSEST_LOWER is intentional**: forces the 16:9 sensor mode (1920×1080, 30fps) instead of the 4:3 native mode (1920×1440, ~20fps) that CLOSEST_HIGHER_THEN_LOWER would pick. JPEG quality **95**. `STRATEGY_KEEP_ONLY_LATEST` prevents backpressure/OOM.
 
-- **`CameraStreamer.kt`** — Binds CameraX `ImageAnalysis` to `ProcessLifecycleOwner` (allows the service to own the camera independently of the Activity). Receives `YUV_420_888` frames, converts to NV21 manually (handles both `pixelStride==2` fast path and `pixelStride==1` slow path), compresses to JPEG via `YuvImage.compressToJpeg()`, and calls `TcpServer.sendFrame()`. Uses `STRATEGY_KEEP_ONLY_LATEST` to prevent frame backpressure/OOM.
+- **`TcpServer.kt`** — Coroutine-based TCP server on port 5000. One client at a time. MIME multipart MJPEG framing (`--frame\r\n...`). Sets `TCP_NODELAY=true` + `sendBufferSize=65536` after accept. Sets `outputStream=null` on send failure (disconnect detection).
 
-- **`TcpServer.kt`** — Coroutine-based TCP server on port 5000. Accepts one client at a time. Wraps each JPEG in MIME multipart format (`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: N\r\n\r\n<data>\r\n`). Sets `outputStream = null` on send failure so the service loop detects disconnection.
+### Linux (`linux/` — Cargo crate)
 
-### Linux (`linux/`)
+- **`src/main.rs`** — egui `CamPCApp`. Catppuccin Mocha theme. Top panel: status. Bottom panel: FPS slider (5-30), Rotation buttons (0/90/180/270°), Iniciar/Detener/Salir. Central panel: 640×360 preview canvas (GPU texture, bilinear). `on_exit()` kills FFmpeg by PID synchronously + removes ADB forward.
 
-- **`setup_ubuntu.sh`** — Run once per machine (Ubuntu only). Installs `android-tools-adb`, `v4l2loopback-dkms`, `v4l-utils`, and Python packages (`opencv-python`, `pyfakewebcam`, `Pillow`). Loads the module with `exclusive_caps=1` and persists via `/etc/modules-load.d/` and `/etc/modprobe.d/`.
+- **`src/engine.rs`** — Engine thread state machine:
+  - States: `Idle → WaitingDevice → Connecting → Streaming`
+  - Polls `adb device_connected()` every 2s
+  - Runs `adb forward tcp:PORT tcp:PORT`
+  - Spawns FFmpeg; checks health every 200ms; respawns on exit (500ms delay)
+  - `EngineCmd`: `Start`, `Stop`, `UpdateConfig(Config)`
 
-- **`campc.py`** — Main GUI app (Python/Tkinter). Threading model: Tkinter event loop on main thread + capture thread. The capture thread calls `adb forward`, opens `cv2.VideoCapture("tcp://localhost:5000", CAP_FFMPEG)`, and per frame: applies zoom (centre-crop + resize), rotation (`cv2.rotate`), resizes to output resolution, writes to `/dev/video10` via `pyfakewebcam.FakeWebcam`, and pushes a 640×360 thumbnail to the Tkinter canvas via `root.after()`. On disconnect, retries every 2 s automatically. Cleans up `adb forward --remove` on exit via `atexit`.
+- **`src/ffmpeg.rs`** — FFmpeg supervisor + frame reader.
+  - `build_vf_filter(cfg)`: `[transpose] → crop=iw:iw*9/16 → scale=1920:1080:in_range=full:out_range=limited → setsar=1`
+  - `spawn_ffmpeg()`: runs FFmpeg with `-fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 -f mpjpeg -i tcp://localhost:PORT -vf ... -f rawvideo -pix_fmt yuv420p -r FPS pipe:1`
+  - Frame-reader thread: reads yuv420p frames → `V4l2Writer::write_frame()` → `yuv420p_to_preview_rgb()` → `preview_tx`
+  - `PREVIEW_W=640`, `PREVIEW_H=360`, `OUTPUT_W=1920`, `OUTPUT_H=1080`
 
-  Controls exposed in the UI:
-  | Control | Variable | Range |
-  |---|---|---|
-  | Zoom slider | `zoom_var` DoubleVar | 1.0 – 4.0× |
-  | FPS slider | `fps_var` IntVar | 5 – 30 |
-  | Rotation radio | `rotation_var` IntVar | 0 / 90 / 180 / 270° |
-  | Output resolution radio | `resolution_var` StringVar | 720p / 1080p / 480p |
+- **`src/v4l2.rs`** — `V4l2Writer`: opens device, calls `VIDIOC_S_FMT` with **`V4L2_BUF_TYPE_VIDEO_CAPTURE=1`** (not OUTPUT=2), writes frames via `write_all()`.
 
-- **`setup.sh`** / **`start.sh`** — Legacy Fedora/ffmpeg scripts (kept for reference, not the primary workflow).
+- **`src/adb.rs`** — `device_connected()`, `forward(port)`, `remove_forward(port)`.
+
+- **`src/config.rs`** — `Config { fps, rotation, v4l2_device, adb_port, preview_fps }`. Loads/saves TOML at `~/.config/campc/config.toml`. Defaults: fps=30, rotation=0, device=/dev/video10, port=5000.
+
+## Threading model (Rust)
+
+```
+main thread        egui event loop → repaints at 30fps, drains preview_rx channel
+engine thread      ADB poll + FFmpeg spawn/health/respawn loop (200ms tick)
+frame-reader       spawned per FFmpeg instance; reads stdout pipe → V4L2 write + preview_tx send
+```
 
 ## Key implementation notes
 
-- `exclusive_caps=1` on v4l2loopback is critical — without it, Zoom/Meet/Teams won't recognize the device as a real capture camera.
-- `CameraStreamingService` uses `ProcessLifecycleOwner.get()` (not the Activity's lifecycle) so the camera stays open when the user navigates away from the app.
-- `TcpServer` accepts only one concurrent client; if a second PC connects, the first is closed first.
-- `campc.py` handles reconnection automatically in the capture thread — no reconnect logic is needed in the Android app.
-- `pyfakewebcam.FakeWebcam` is recreated whenever the output resolution changes (it must be constructed with fixed dimensions).
-- After a kernel upgrade, `setup_ubuntu.sh` must be re-run so DKMS rebuilds the `v4l2loopback` module for the new kernel.
-- All UI updates from the capture thread use `root.after(0, ...)` — never call Tkinter widgets directly from a background thread.
+### V4L2 with exclusive_caps=1
+`v4l2loopback exclusive_caps=1` makes the device advertise **only** `V4L2_CAP_VIDEO_CAPTURE` (caps = `0x05200000`). `VIDIOC_S_FMT` with `V4L2_BUF_TYPE_VIDEO_OUTPUT=2` returns `EINVAL (os error 22)`. **Must use `V4L2_BUF_TYPE_VIDEO_CAPTURE=1`**, then write raw frames directly via `write()`. This works; FFmpeg's built-in v4l2 muxer does not on kernel 6.x.
+
+### CameraX resolution — why FALLBACK_RULE_CLOSEST_LOWER
+`FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER` causes CameraX to pick 1920×1440 (the sensor's native 4:3 high-res mode, ~20fps). `FALLBACK_RULE_CLOSEST_LOWER` forces ≤1920×1080 which selects the 16:9 mode (30fps). The FFmpeg crop filter handles the aspect ratio mismatch if the phone delivers a slightly different size.
+
+### FFmpeg low-latency flags
+`-probesize 32 -analyzeduration 0` eliminate the ~1-2s startup buffer. `-fflags nobuffer -flags low_delay` reduce per-frame buffering. Without these, FFmpeg buffers ~5MB before outputting the first frame.
+
+### ADB port in engine.rs
+`UpdateConfig` must save `old_port = config.adb_port` **before** overwriting `config = new_cfg`, then call `adb::remove_forward(old_port)`. The current code does this correctly.
+
+### exclusive_caps=1 requirement
+Without `exclusive_caps=1`, Zoom, Google Meet, and Teams won't recognize the device as a real capture camera (they filter by capability flags).
+
+### After kernel upgrade
+Re-run `setup_ubuntu.sh` — DKMS must rebuild the v4l2loopback module for the new kernel.
+
+## What does NOT exist (legacy, removed, or never built)
+- `linux/campc.py` — Python/Tkinter prototype. No longer the primary app.
+- `linux/launch.sh` / `linux/setup.sh` — Legacy scripts for Fedora/ffmpeg workflow.
+- Zoom, resolution, or quality controls in the GUI — removed; output is fixed 1920×1080, JPEG quality is fixed on Android.

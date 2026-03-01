@@ -9,29 +9,38 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  ANDROID                                                                     │
+│  ANDROID  (mobile_cam_app/)                                                  │
 │                                                                              │
-│  CameraX (rear camera, 1280×720 @ up to 30 fps)                             │
+│  CameraX  — rear camera, 1920×1080 @ 30 fps (ResolutionSelector)            │
 │       │ YUV_420_888 frames                                                   │
 │       ▼                                                                      │
 │  CameraStreamer.kt                                                           │
-│       │ converts YUV → NV21 → JPEG (quality 75)                             │
+│       │ converts YUV → NV21 → JPEG (quality 95)                             │
 │       ▼                                                                      │
 │  TcpServer.kt                                                                │
-│       │ wraps each JPEG in a MIME multipart frame (MJPEG)                   │
-│       │ listens on TCP :5000                                                 │
+│       │ wraps each JPEG in MIME multipart (MJPEG)                           │
+│       │ listens on TCP :5000  (TCP_NODELAY, 64 KB send buffer)              │
 └───────┼──────────────────────────────────────────────────────────────────────┘
         │  USB cable
-        │  adb forward tcp:5000 tcp:5000  (handled automatically)
+        │  adb forward tcp:5000 tcp:5000  (managed by the Rust app)
         ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  LINUX PC (Ubuntu)                                                           │
+│  LINUX PC — Ubuntu  (linux/)                                                 │
 │                                                                              │
-│  campc.py (Python/Tkinter GUI)                                               │
-│       │ reads MJPEG stream via OpenCV (CAP_FFMPEG)                          │
-│       │ applies zoom, rotation, FPS limiting                                 │
-│       │ writes frames to /dev/video10 via pyfakewebcam                      │
-│       │ shows live preview in the GUI window                                 │
+│  campc  (Rust/egui GUI)                                                      │
+│    Engine thread                                                             │
+│       │ polls ADB device presence every 2 s                                 │
+│       │ runs adb forward tcp:5000 tcp:5000                                  │
+│       │ spawns FFmpeg subprocess:                                            │
+│       │   ffmpeg -fflags nobuffer -flags low_delay                          │
+│       │          -probesize 32 -analyzeduration 0                           │
+│       │          -f mpjpeg -i tcp://localhost:5000                           │
+│       │          -vf "crop,scale=1920:1080,setsar=1"                        │
+│       │          -f rawvideo -pix_fmt yuv420p pipe:1                        │
+│    Frame-reader thread (per FFmpeg spawn)                                    │
+│       │ reads yuv420p frames from FFmpeg stdout                             │
+│       │ writes each frame to /dev/video10 via VIDIOC_S_FMT + write()       │
+│       │ downscales to 640×360 RGB24 → mpsc channel → GUI preview texture   │
 │       ▼                                                                      │
 │  /dev/video10  (v4l2loopback, label: "AndroidCam", exclusive_caps=1)        │
 │       ▼                                                                      │
@@ -47,6 +56,8 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 - **Linux:** Ubuntu (uses `v4l2loopback-dkms` via apt)
 - **USB cable** with data (not charge-only)
 - **USB debugging** enabled on the phone (Developer Options)
+- **Rust toolchain** (`rustup` + `cargo`)
+- **FFmpeg** (`sudo apt install ffmpeg`)
 
 ---
 
@@ -55,69 +66,73 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 ### 1. Linux — install dependencies and create the virtual device
 
 ```bash
-cd linux
-bash setup_ubuntu.sh
+bash linux/setup_ubuntu.sh
 ```
 
-This installs `android-tools-adb`, `v4l2loopback-dkms`, `v4l-utils`, and the Python packages (`opencv-python`, `pyfakewebcam`, `Pillow`). It also loads the v4l2loopback kernel module and persists it across reboots.
+Installs `android-tools-adb`, `v4l2loopback-dkms`, `v4l-utils`, `ffmpeg`. Loads the v4l2loopback kernel module with `exclusive_caps=1` and persists it across reboots.
 
 > After a kernel upgrade, re-run `setup_ubuntu.sh` so DKMS rebuilds the module for the new kernel.
 
-### 2. Android — build and install the app
+### 2. Build the Linux GUI app
+
+```bash
+~/.cargo/bin/cargo build --release --manifest-path linux/Cargo.toml
+```
+
+Binary lands at `linux/target/release/campc`.
+
+### 3. Android — build and install the app
 
 ```bash
 cd mobile_cam_app
 ./gradlew installDebug
 ```
 
-Or open `mobile_cam_app/` in Android Studio and run directly on your device.
+Or open `mobile_cam_app/` in Android Studio and run directly on the device.
 
 ---
 
 ## Daily use
 
-**Correct order:**
-
 1. Connect the phone via USB
 2. On the phone: open **CamPC** → tap **Start Streaming**
 3. On the PC:
    ```bash
-   cd linux
-   bash launch.sh
+   ./linux/target/release/campc
    ```
 4. The GUI window opens. Click **▶ Iniciar** to start receiving frames.
 5. In Zoom / Meet / Teams → Settings → Video → Camera → select **AndroidCam**
 
-> Open the video call app **after** campc.py is connected and showing the preview.
-> If you already had it open, restart it so it detects the device.
+> Open the video call app **after** campc is connected and showing the preview.
+> If it was already open, restart it so it re-scans the V4L2 devices.
 
 ---
 
 ## Android app
 
-The app has a single screen with a **Start Streaming / Stop Streaming** toggle button and a status indicator.
+Single screen with **Start Streaming / Stop Streaming** toggle.
 
-- Tapping **Start Streaming** requests Camera and Notification permissions (if not already granted), then starts a foreground service that runs independently of the UI.
-- The status dot turns green and shows `Streaming · TCP :5000` while active.
-- The stream continues **even with the screen locked** — the service holds a `PARTIAL_WAKE_LOCK` and uses its own `LifecycleOwner` (independent of the Activity) so CameraX stays bound regardless of screen state.
-- A persistent notification appears while streaming, with a **Stop** button to end the service from the notification shade.
+- Tapping **Start Streaming** requests Camera and Notification permissions, then starts a foreground service that runs independently of the UI.
+- Stream continues **even with the screen locked** — the service holds a `PARTIAL_WAKE_LOCK` and uses its own `LifecycleOwner` so CameraX stays bound regardless of screen state.
+- A persistent notification appears while streaming, with a **Stop** button.
 
 ---
 
-## Linux GUI (campc.py)
+## Linux GUI (campc)
 
-The GUI window provides a live 640×360 preview and the following controls:
+Catppuccin Mocha themed egui window with a live **640×360 preview canvas** and controls:
 
-| Control | Variable | Range | Effect |
-|---|---|---|---|
-| **Zoom** slider | `zoom_var` | 1.0 – 4.0× | Centre-crops the frame and scales back to original size (no distortion) |
-| **FPS** slider | `fps_var` | 5 – 30 fps | Limits the output frame rate |
-| **Rotation** radio | `rotation_var` | 0 / 90 / 180 / 270° | Rotates the output frame |
-| **Output** radio | `resolution_var` | 720p / 1080p / 480p | Sets the resolution written to `/dev/video10` |
+| Control | Range | Effect |
+|---|---|---|
+| **FPS** slider | 5 – 30 fps | Target framerate passed to FFmpeg `-r` |
+| **Rotation** buttons | 0 / 90 / 180 / 270° | Adds `transpose` filter to FFmpeg `-vf` |
+| **▶ Iniciar** | — | Starts ADB polling and FFmpeg pipeline |
+| **■ Detener** | — | Kills FFmpeg, removes ADB forward |
+| **Salir** | — | Graceful exit (kills FFmpeg orphans, saves config) |
 
-The status bar shows **● Conectado** (green) when receiving frames, and the ADB indicator shows whether `adb forward` succeeded. On disconnect, the app retries automatically every 2 seconds.
+Status indicator in the header bar: `Detenido` / `Esperando dispositivo…` / `Conectando…` / `● Transmitiendo` / `Error: …`
 
-> If a video call app (Zoom, Meet) is already connected to `/dev/video10` when you change resolution, the device format is locked by that reader and the resolution change will take effect only after closing the call.
+Config is saved to `~/.config/campc/config.toml` (fps, rotation, v4l2_device, adb_port).
 
 ---
 
@@ -130,35 +145,38 @@ cam-mobile-pc/
 │       ├── java/com/mobilecamapp/
 │       │   ├── MainActivity.kt            # UI + permissions + service control
 │       │   ├── CameraStreamingService.kt  # ForegroundService (type: camera)
-│       │   │                              #   owns LifecycleOwner + WakeLock
-│       │   ├── CameraStreamer.kt          # CameraX + YUV→NV21→JPEG conversion
-│       │   └── TcpServer.kt              # TCP server + MJPEG framing
+│       │   │                              #   LifecycleOwner + WakeLock + TcpServer/CameraStreamer
+│       │   ├── CameraStreamer.kt          # CameraX + YUV→NV21→JPEG (quality 95)
+│       │   │                              #   ResolutionSelector → 1920×1080, FALLBACK_RULE_CLOSEST_LOWER
+│       │   └── TcpServer.kt              # TCP server :5000, MJPEG framing, TCP_NODELAY
 │       ├── res/layout/activity_main.xml
 │       └── AndroidManifest.xml
-├── linux/
-│   ├── campc.py          # Python/Tkinter GUI app (main Linux component)
-│   ├── launch.sh         # Daily launcher: reloads v4l2loopback + starts campc.py
-│   └── setup_ubuntu.sh   # One-time setup (apt + pip3 + module persistence)
-└── README.md
+└── linux/                                 # Cargo crate root (binary: campc)
+    ├── Cargo.toml
+    └── src/
+        ├── main.rs     # egui App (CamPCApp), preview canvas, theme, on_exit cleanup
+        ├── engine.rs   # State machine thread: ADB poll → FFmpeg spawn/health/respawn
+        ├── ffmpeg.rs   # build_vf_filter(), spawn_ffmpeg(), frame reader thread, YUV→RGB preview
+        ├── v4l2.rs     # V4l2Writer: VIDIOC_S_FMT (CAPTURE buf_type) + write() per frame
+        ├── adb.rs      # device_connected(), forward(), remove_forward()
+        └── config.rs   # Config struct, TOML load/save → ~/.config/campc/config.toml
 ```
 
 ---
 
-## How the pipeline works in detail
+## Pipeline details
 
 ### Color conversion on Android
 
-CameraX delivers frames as `YUV_420_888`. To compress with Android's `YuvImage` the format must be `NV21`:
+CameraX delivers `YUV_420_888`. To compress with `YuvImage` the format must be `NV21`:
 
-1. **Y plane** is copied directly (full luminance).
-2. **UV plane** — two cases:
-   - `vPlane.pixelStride == 2` → hardware already delivered interleaved VU (semi-planar), copied directly (**fast path**).
-   - `pixelStride == 1` → V and U bytes are interleaved manually (**slow path**).
-3. `YuvImage.compressToJpeg()` compresses at quality 75 (~3–8 Mbps depending on content).
+1. **Y plane** — copied directly (full luminance), row-stride-aware.
+2. **UV plane** — interleaved as VU (NV21 order), taking `uvPixelStride` into account.
+3. `YuvImage.compressToJpeg()` at quality **95** (~10–20 Mbps depending on content).
 
 ### MJPEG over TCP
 
-The protocol is `multipart/x-mixed-replace`, the same used by IP cameras:
+Protocol: `multipart/x-mixed-replace`, same as IP cameras:
 
 ```
 --frame\r\n
@@ -171,12 +189,21 @@ Content-Length: <bytes>\r\n
 ...
 ```
 
-OpenCV's `CAP_FFMPEG` backend reads this natively via `tcp://localhost:5000`.
+FFmpeg reads this with `-f mpjpeg`.
 
-### Virtual V4L2 device
+### FFmpeg video filter
 
-- `v4l2loopback` creates `/dev/video10` with `exclusive_caps=1`, which makes the device announce itself as a capture camera (not output-only) — required for Zoom, Meet, and Teams to recognize it.
-- `pyfakewebcam` converts RGB frames to YUYV and writes them to the device via `VIDIOC_S_FMT` + `os.write`.
+```
+crop=iw:iw*9/16:0:(ih-iw*9/16)/2    → crop to 16:9 (phone may send wider frames)
+scale=1920:1080:in_range=full:out_range=limited  → rescale + JPEG full-range → TV limited-range
+setsar=1                              → enforce square pixels
+```
+
+Rotation prepends `transpose=1` (90° CW) / `hflip,vflip` (180°) / `transpose=2` (90° CCW).
+
+### V4L2 output (Rust, bypassing FFmpeg muxer)
+
+`v4l2loopback` with `exclusive_caps=1` only advertises `V4L2_CAP_VIDEO_CAPTURE`. Using `VIDIOC_S_FMT` with `V4L2_BUF_TYPE_VIDEO_OUTPUT` returns EINVAL. The Rust `V4l2Writer` uses **`V4L2_BUF_TYPE_VIDEO_CAPTURE=1`** for the ioctl, then writes raw yuv420p frames directly via `write()`. This works reliably on kernel 6.x where FFmpeg's built-in v4l2 muxer fails.
 
 ---
 
@@ -184,13 +211,14 @@ OpenCV's `CAP_FFMPEG` backend reads this natively via `tcp://localhost:5000`.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Zoom/Meet shows no camera | Device not detected | Open the call **after** campc.py is connected; or restart the call app |
-| `FakeWebcam error: device does not exist` | v4l2loopback not loaded | Run `bash linux/launch.sh` (it loads the module automatically) |
-| `[Errno 16] Device or resource busy` | Another process holds `/dev/video10` | `launch.sh` reloads the module on every run, clearing stale handles |
-| Stream stops when screen locks | (fixed) WakeLock + custom LifecycleOwner | Already handled in current app version |
-| Resolution change has no effect | Video call app holds the device format lock | Close the call first, change resolution in campc.py, then rejoin |
-| High latency | USB cable quality or background load | Try a different cable; close other apps |
-| ADB forward fails | USB debugging not enabled or cable issue | Check Developer Options; unplug and replug |
+| Zoom/Meet shows no camera | Call opened before campc was streaming | Restart the call app after campc shows preview |
+| `[v4l2] VIDIOC_S_FMT failed: Invalid argument` | Wrong buf_type or module not loaded | Confirm `exclusive_caps=1` module is loaded; `lsmod \| grep v4l2loopback` |
+| `[v4l2] device unavailable — preview only` | `/dev/video10` doesn't exist | Run `setup_ubuntu.sh`; or `sudo modprobe v4l2loopback exclusive_caps=1` |
+| FFmpeg exits immediately | Phone app not streaming yet | Start the Android app first; wait for "Waiting for connection…" notification |
+| `speed=0.675x` in FFmpeg logs | Camera in 4:3 sensor mode (1920×1440) → ~20fps | `FALLBACK_RULE_CLOSEST_LOWER` in `CameraStreamer.kt` should force 16:9 mode |
+| Preview looks pixelated | Window too small relative to preview texture | Resize the window larger; preview texture is 640×360 |
+| High latency | TCP buffering or USB cable | `-probesize 32 -analyzeduration 0` flags already applied; try a better cable |
+| ADB forward fails | USB debugging not enabled | Enable Developer Options → USB debugging on the phone |
 | Module missing after kernel upgrade | DKMS needs rebuild | Re-run `bash linux/setup_ubuntu.sh` |
 
 ---
@@ -198,26 +226,24 @@ OpenCV's `CAP_FFMPEG` backend reads this natively via `tcp://localhost:5000`.
 ## Quick verification
 
 ```bash
-# Confirm the module is loaded and device exists
-lsmod | grep v4l2loopback
-v4l2-ctl --list-devices
-
-# Inspect the raw MJPEG stream from the phone
-nc localhost 5000 | head -c 300
-
-# Check which process owns the device
-fuser /dev/video10
+lsmod | grep v4l2loopback            # confirm module is loaded
+v4l2-ctl --list-devices              # confirm /dev/video10 "AndroidCam" exists
+cat /sys/module/v4l2loopback/parameters/exclusive_caps  # should print 1
+nc localhost 5000 | head -c 300      # inspect raw MJPEG stream from phone (while app streams)
+fuser /dev/video10                   # check which process owns the device
 ```
 
 ---
 
 ## Design decisions
 
-| Decision | Choice | Why |
+| Decision | Choice | Rationale |
 |---|---|---|
-| Video protocol | MJPEG (MIME multipart) | Each frame is an independent JPEG; OpenCV reads it natively; resilient to packet loss |
-| Transport | ADB forward over USB | No network config needed; low and stable latency; works in any environment |
-| Virtual device | v4l2loopback with `exclusive_caps=1` | Appears as a real webcam to Zoom, Meet, Teams (they filter out devices without this flag) |
-| Android encoding | CameraX + YuvImage | Simpler than MediaCodec; `STRATEGY_KEEP_ONLY_LATEST` prevents frame backlog and OOM |
-| Linux GUI | Python/Tkinter + OpenCV + pyfakewebcam | No external process (no ffmpeg); native preview; live controls without restart |
-| Resolution / FPS | 1280×720 @ up to 30 fps, JPEG quality 75 | ~3–8 Mbps; comfortably fits USB 2.0; sufficient for video calls |
+| Video protocol | MJPEG (MIME multipart) | Each frame is independent; FFmpeg reads natively; resilient to packet loss |
+| Transport | ADB forward over USB | No network config; low stable latency; works anywhere |
+| Virtual device | v4l2loopback `exclusive_caps=1` | Zoom/Meet/Teams require this flag to recognise the device as a capture camera |
+| Android encoding | CameraX + YuvImage JPEG 95 | Simple pipeline; `STRATEGY_KEEP_ONLY_LATEST` prevents backpressure/OOM |
+| Linux app | Rust + egui + FFmpeg subprocess | Native performance; GPU preview; no Python runtime dependency |
+| V4L2 write | Rust ioctls (CAPTURE buf_type) + write() | FFmpeg v4l2 muxer fails on kernel 6.x with `exclusive_caps=1`; CAPTURE type accepted |
+| Preview | 640×360 yuv→rgb in frame-reader thread | Decoded in background; main thread only uploads texture to GPU |
+| Resolution | 1920×1080 fixed output | Maximum quality; crop filter handles non-16:9 phone sensors |
