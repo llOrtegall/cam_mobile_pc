@@ -22,11 +22,15 @@ class CameraStreamer(
 ) {
     companion object {
         private const val TAG = "CameraStreamer"
-        private const val JPEG_QUALITY = 95
+        private const val JPEG_QUALITY = 75
     }
 
     private val analyzerExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var cameraProvider: ProcessCameraProvider? = null
+
+    // Reused across frames to avoid per-frame GC pressure (128 KB initial capacity).
+    // Safe: analyzerExecutor is single-threaded so no concurrent access.
+    private val bos = ByteArrayOutputStream(131072)
 
     fun start(lifecycleOwner: LifecycleOwner, context: android.content.Context) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -42,7 +46,7 @@ class CameraStreamer(
         val resolutionSelector = ResolutionSelector.Builder()
             .setResolutionStrategy(
                 ResolutionStrategy(
-                    Size(1920, 1080),
+                    Size(1280, 720),
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER
                 )
             )
@@ -140,8 +144,8 @@ class CameraStreamer(
         }
 
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, width, height), JPEG_QUALITY, out)
-        return out.toByteArray()
+        bos.reset()
+        yuvImage.compressToJpeg(Rect(0, 0, width, height), JPEG_QUALITY, bos)
+        return bos.toByteArray()
     }
 }

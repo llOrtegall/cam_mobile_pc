@@ -7,6 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.BufferedOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.net.ServerSocket
@@ -56,10 +57,10 @@ class TcpServer(
 
                     Log.i(TAG, "Client connected: ${client.inetAddress}")
                     client.tcpNoDelay = true
-                    client.sendBufferSize = 65536
+                    client.sendBufferSize = 524288
                     synchronized(streamLock) {
                         currentClient = client
-                        outputStream = client.getOutputStream()
+                        outputStream = BufferedOutputStream(client.getOutputStream(), 524288)
                     }
                     onClientConnected()
 

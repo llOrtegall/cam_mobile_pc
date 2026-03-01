@@ -11,9 +11,9 @@ pub const PREVIEW_W: u32 = 640;
 pub const PREVIEW_H: u32 = 360;
 pub const PREVIEW_FRAME_BYTES: usize = (PREVIEW_W * PREVIEW_H * 3) as usize;
 
-// Fixed output resolution — always 1080p for maximum quality
-pub const OUTPUT_W: u32 = 1920;
-pub const OUTPUT_H: u32 = 1080;
+// Fixed output resolution — 720p for lower latency and bandwidth
+pub const OUTPUT_W: u32 = 1280;
+pub const OUTPUT_H: u32 = 720;
 
 /// Builds a `-vf` filter string from the current config.
 ///
@@ -77,7 +77,7 @@ pub fn spawn_ffmpeg(cfg: &Config, tcp_host: &str, tcp_port: u16, preview_tx: Syn
         "-analyzeduration".into(), "0".into(),
         // Allow FFmpeg's thread queue to buffer enough packets before the
         // decoder starts consuming them — prevents starvation under WiFi jitter.
-        "-thread_queue_size".into(), "512".into(),
+        "-thread_queue_size".into(), "64".into(),
         // Explicitly specify multipart-JPEG format — no stream probing needed.
         "-f".into(), "mpjpeg".into(),
         "-i".into(), tcp_url,
