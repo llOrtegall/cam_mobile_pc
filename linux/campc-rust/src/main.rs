@@ -150,19 +150,6 @@ impl eframe::App for CamPCApp {
             .show(ctx, |ui| {
                 let mut changed = false;
 
-                // Zoom slider
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Zoom").color(C_TEXT).size(11.0));
-                    ui.add_space(4.0);
-                    let resp = ui.add(
-                        egui::Slider::new(&mut self.config.zoom, 1.0..=4.0)
-                            .custom_formatter(|v, _| format!("{v:.1}×")),
-                    );
-                    if resp.drag_stopped() {
-                        changed = true;
-                    }
-                });
-
                 // FPS slider
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("FPS ").color(C_TEXT).size(11.0));
@@ -184,19 +171,6 @@ impl eframe::App for CamPCApp {
                             .clicked()
                         {
                             self.config.rotation = deg;
-                            changed = true;
-                        }
-                    }
-                });
-
-                // Resolution selectors
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Salida  ").color(C_TEXT).size(11.0));
-                    ui.add_space(4.0);
-                    for res in ["720p", "1080p", "480p"] {
-                        let selected = self.config.resolution == res;
-                        if ui.add(selectable_btn(res, selected)).clicked() {
-                            self.config.resolution = res.to_string();
                             changed = true;
                         }
                     }
