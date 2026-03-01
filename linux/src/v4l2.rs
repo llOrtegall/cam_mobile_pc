@@ -4,9 +4,15 @@ use std::os::unix::io::AsRawFd;
 
 // ── V4L2 constants ────────────────────────────────────────────────────────────
 
-// With exclusive_caps=1, v4l2loopback only advertises CAPTURE capability.
-// The producer must use CAPTURE buf_type for VIDIOC_S_FMT to avoid EINVAL,
-// then write raw frames directly via write().
+// Buf-type constants for VIDIOC_S_FMT.
+// Behaviour depends on the v4l2loopback version and kernel:
+//   ≤ 0.12.x on kernel < 6.x  → CAPTURE (1) worked, OUTPUT (2) returned EINVAL
+//   0.13.x+  on kernel ≥ 6.x  → OUTPUT (2) is correct (producer role); the
+//                                 CAPTURE bit is exposed only to consumers such
+//                                 as Zoom / Meet.  CAPTURE (1) now returns EINVAL.
+// V4l2Writer::new() tries OUTPUT first and falls back to CAPTURE so the binary
+// works across both generations without recompilation.
+const V4L2_BUF_TYPE_VIDEO_OUTPUT:  u32 = 2;
 const V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
 const V4L2_FIELD_NONE: u32 = 1;
 // YU12 = planar YUV 4:2:0, same as FFmpeg yuv420p
@@ -58,8 +64,15 @@ pub struct V4l2Writer {
 impl V4l2Writer {
     /// Open `device` and configure it for yuv420p output at `width`×`height`.
     /// Returns None if the device can't be opened or VIDIOC_S_FMT fails.
+    ///
+    /// Tries VIDEO_OUTPUT (buf_type=2) first — correct for v4l2loopback 0.13+
+    /// on kernel 6.x.  Falls back to VIDEO_CAPTURE (buf_type=1) for older
+    /// v4l2loopback versions (≤0.12.x on kernels < 6.x).
     pub fn new(device: &str, width: u32, height: u32) -> Option<Self> {
+        // O_RDWR is required by newer v4l2loopback versions for the producer
+        // role; older versions also accept O_WRONLY.
         let file = OpenOptions::new()
+            .read(true)
             .write(true)
             .open(device)
             .map_err(|e| eprintln!("[v4l2] open {device}: {e}"))
@@ -68,11 +81,7 @@ impl V4l2Writer {
         let bytesperline = width;
         let sizeimage = width * height * 3 / 2;
 
-        let mut fmt = V4l2Format {
-            buf_type: V4L2_BUF_TYPE_VIDEO_CAPTURE,
-            _pad: 0,
-            fmt: [0u8; 200],
-        };
+        let mut fmt = V4l2Format { buf_type: 0, _pad: 0, fmt: [0u8; 200] };
         write_u32(&mut fmt.fmt, 0, width);
         write_u32(&mut fmt.fmt, 4, height);
         write_u32(&mut fmt.fmt, 8, V4L2_PIX_FMT_YUV420);
@@ -80,15 +89,26 @@ impl V4l2Writer {
         write_u32(&mut fmt.fmt, 16, bytesperline);
         write_u32(&mut fmt.fmt, 20, sizeimage);
 
-        let ret = unsafe { libc::ioctl(file.as_raw_fd(), VIDIOC_S_FMT, &mut fmt as *mut V4l2Format) };
-        if ret < 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("[v4l2] VIDIOC_S_FMT failed: {err}");
-            return None;
+        for &buf_type in &[V4L2_BUF_TYPE_VIDEO_OUTPUT, V4L2_BUF_TYPE_VIDEO_CAPTURE] {
+            fmt.buf_type = buf_type;
+            let ret = unsafe {
+                libc::ioctl(file.as_raw_fd(), VIDIOC_S_FMT, &mut fmt as *mut V4l2Format)
+            };
+            if ret == 0 {
+                eprintln!(
+                    "[v4l2] device configured: {width}x{height} YUV420 \
+                     (buf_type={buf_type})"
+                );
+                return Some(V4l2Writer { file });
+            }
+            eprintln!(
+                "[v4l2] VIDIOC_S_FMT buf_type={buf_type} failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
-        eprintln!("[v4l2] device configured: {width}x{height} YUV420");
-        Some(V4l2Writer { file })
+        eprintln!("[v4l2] could not configure {device} — is v4l2loopback loaded?");
+        None
     }
 
     /// Write one yuv420p frame to the device. Returns false on error.
