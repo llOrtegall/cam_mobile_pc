@@ -22,7 +22,7 @@ class CameraStreamer(
 ) {
     companion object {
         private const val TAG = "CameraStreamer"
-        private const val JPEG_QUALITY = 75
+        private const val JPEG_QUALITY = 85
     }
 
     private val analyzerExecutor: ExecutorService = Executors.newSingleThreadExecutor()
