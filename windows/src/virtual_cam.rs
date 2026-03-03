@@ -9,14 +9,14 @@
 //!     ▼
 //! StreamShared (Arc<Mutex<SharedInner>>)
 //!     ├── latest_frame: Option<Vec<u8>>        ← most recent NV12 frame
-//!     ├── pending_token: Option<IUnknown>       ← token waiting for a frame
+//!     ├── pending_tokens: VecDeque              ← tokens waiting for a frame
 //!     ├── stream_started: bool
 //!     └── event_queue: Option<IMFMediaEventQueue>  ← owned by AndroidCamStream
 //!          ▲
-//! AndroidCamStream (COM — Zoom/Teams calls RequestSample here)
+//! AndroidCamStream (COM — Meet/Zoom/Teams calls RequestSample here)
 //!     │  RequestSample(token):
 //!     │    if frame ready → deliver immediately via MEMediaSample event
-//!     │    else → save token in shared.pending_token
+//!     │    else → save token in shared.pending_tokens
 //!     └── GetStreamDescriptor → NV12 1280×720 @30fps MediaType
 //! ```
 //!
@@ -32,41 +32,10 @@ use windows::{
     core::*,
     Win32::Foundation::*,
     Win32::Media::MediaFoundation::*,
-    Win32::System::Com::*,
 };
-
-// ── Helper functions for queuing Media Foundation events ─────────────────────────
-
-unsafe fn queue_event_param_none(
-    queue: &IMFMediaEventQueue,
-    met: u32,
-    guid: &GUID,
-    hr: HRESULT,
-) -> Result<()> {
-    let event = MFCreateMediaEvent(met, guid, hr, None)?;
-    queue.QueueEvent(&event)
-}
-
-unsafe fn queue_event_param_unk<P>(
-    queue: &IMFMediaEventQueue,
-    met: u32,
-    guid: &GUID,
-    hr: HRESULT,
-    _punk: P,
-) -> Result<()>
-where
-    P: windows_core::Param<IUnknown>,
-{
-    // Simplified: just queue the event without the IUnknown parameter 
-    // because building PROPVARIANT manually is too complex in windows 0.58
-    let event = MFCreateMediaEvent(met, guid, hr, None)?;
-    queue.QueueEvent(&event)
-}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const OUTPUT_W: u32 = 1280;
-const OUTPUT_H: u32 = 720;
 const OUTPUT_FPS_N: u32 = 30;
 const OUTPUT_FPS_D: u32 = 1;
 
@@ -250,16 +219,17 @@ impl IMFMediaEventGenerator_Impl for AndroidCamStream_Impl {
         met: u32,
         guidextendedtype: *const GUID,
         hrstatus: HRESULT,
-        _pvvalue: *const PROPVARIANT,
+        pvvalue: *const PROPVARIANT,
     ) -> Result<()> {
         let queue = {
             let inner = self.shared.inner.lock().unwrap();
             inner.event_queue.clone()
         };
+        let pv_opt = if pvvalue.is_null() { None } else { Some(pvvalue) };
         match queue {
-            Some(q) => {
-                let event = unsafe { MFCreateMediaEvent(met, guidextendedtype, hrstatus, None)? };
-                unsafe { q.QueueEvent(&event) }
+            Some(q) => unsafe {
+                let event = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv_opt)?;
+                q.QueueEvent(&event)
             },
             None => Err(MF_E_SHUTDOWN.into()),
         }
@@ -288,21 +258,18 @@ impl IMFMediaStream_Impl for AndroidCamStream_Impl {
             // Frame available — deliver immediately.
             let sample_time = inner.sample_time;
             inner.sample_time += HNS_PER_SEC / OUTPUT_FPS_N as i64;
+            let eq = inner.event_queue.clone();
             drop(inner);
 
-            unsafe {
-                let sample = build_sample(
-                    &frame_data,
-                    self.shared.width,
-                    self.shared.height,
-                    sample_time,
-                )?;
-
-                let queue = {
-                    let inner2 = self.shared.inner.lock().unwrap();
-                    inner2.event_queue.clone()
-                };
-                if let Some(q) = queue {
+            if let Some(q) = eq {
+                unsafe {
+                    let sample = build_sample(
+                        &frame_data,
+                        self.shared.width,
+                        self.shared.height,
+                        sample_time,
+                    )?;
+                    // Carry the sample as IUnknown in the MEMediaSample event.
                     q.QueueEventParamUnk(
                         MEMediaSample.0 as u32,
                         &GUID::zeroed(),
@@ -353,10 +320,13 @@ impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
         met: u32,
         guidextendedtype: *const GUID,
         hrstatus: HRESULT,
-        _pvvalue: *const PROPVARIANT,
+        pvvalue: *const PROPVARIANT,
     ) -> Result<()> {
-        let event = unsafe { MFCreateMediaEvent(met, guidextendedtype, hrstatus, None)? };
-        unsafe { self.event_queue.QueueEvent(&event) }
+        let pv_opt = if pvvalue.is_null() { None } else { Some(pvvalue) };
+        unsafe {
+            let event = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv_opt)?;
+            self.event_queue.QueueEvent(&event)
+        }
     }
 }
 
@@ -377,60 +347,58 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
     ) -> Result<()> {
         let _ = pdescriptor;
 
-        // Create the stream and publish its event queue to shared state.
+        // Create the stream COM object.
+        let source_intf: IMFMediaSource = unsafe { self.cast()? };
         let stream_obj = AndroidCamStream {
             shared: Arc::clone(&self.shared),
             stream_desc: self.stream_desc.clone(),
-            source: unsafe { self.cast::<IMFMediaSource>()? },
+            source: source_intf,
         };
         let stream: IMFMediaStream = stream_obj.into();
 
-        let stream_event_gen: IMFMediaEventGenerator = stream.cast()?;
-        let stream_eq: IMFMediaEventQueue = unsafe {
-            // Retrieve the stream's own event queue by calling BeginGetEvent/EndGetEvent
-            // is not practical here — instead we reach into the implementation.
-            // Because windows-rs wraps our impl, we cast back and lock.
-            MFCreateEventQueue()?
-        };
-
-        // Publish the stream event queue into shared state so write_frame() can use it.
+        // Create a dedicated event queue for the stream and publish it to shared
+        // state so that RequestSample / write_frame can post MEMediaSample events.
+        let stream_eq: IMFMediaEventQueue = unsafe { MFCreateEventQueue()? };
         {
             let mut inner = self.shared.inner.lock().unwrap();
-            inner.event_queue = Some(stream_eq.clone());
+            inner.event_queue = Some(stream_eq);
             inner.stream_started = true;
         }
 
         *self.stream.lock().unwrap() = Some(stream.clone());
 
-        // Fire MENewStream and MESourceStarted.
+        // Fire MENewStream (must carry the stream as IUnknown so the pipeline
+        // can call BeginGetEvent / RequestSample on it).
+        let stream_unk: IUnknown = stream.cast()?;
         unsafe {
-            queue_event_param_unk(
-                &self.event_queue,
+            self.event_queue.QueueEventParamUnk(
                 MENewStream.0 as u32,
                 &GUID::zeroed(),
                 S_OK,
-                &stream,
+                &stream_unk,
             )?;
-            queue_event_param_none(
-                &self.event_queue,
+
+            let event = MFCreateMediaEvent(
                 MESourceStarted.0 as u32,
                 &GUID::zeroed(),
                 S_OK,
+                None,
             )?;
+            self.event_queue.QueueEvent(&event)?;
         }
 
-        let _ = stream_event_gen;
         Ok(())
     }
 
     fn Stop(&self) -> Result<()> {
         unsafe {
-            queue_event_param_none(
-                &self.event_queue,
+            let event = MFCreateMediaEvent(
                 MESourceStopped.0 as u32,
                 &GUID::zeroed(),
                 S_OK,
+                None,
             )?;
+            self.event_queue.QueueEvent(&event)?;
         }
         Ok(())
     }
@@ -447,10 +415,36 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
     }
 }
 
+// ── Raw vtable call for IMFVirtualCamera::AddMediaSource ─────────────────────
+//
+// windows-rs 0.58 does not expose AddMediaSource on IMFVirtualCamera.
+// The Windows 11 22H2 COM vtable layout is:
+//   0 QueryInterface  1 AddRef  2 Release
+//   3 AddMediaSource(IUnknown*, IMFAttributes*) -> HRESULT
+//   4 Start  5 Stop  6 Remove
+unsafe fn add_media_source_raw(camera: &IMFVirtualCamera, source: &IMFMediaSource) -> Result<()> {
+    type AddMediaSourceFn = unsafe extern "system" fn(
+        *mut std::ffi::c_void,  // this
+        *mut std::ffi::c_void,  // pMediaSource (IUnknown*)
+        *mut std::ffi::c_void,  // pAttributes  (IMFAttributes*, nullable)
+    ) -> HRESULT;
+
+    let camera_ptr = camera.as_raw() as *mut std::ffi::c_void;
+    let vtable = *(camera_ptr as *const *const *const std::ffi::c_void);
+    let fn_ptr = *vtable.add(3);
+    let f: AddMediaSourceFn = std::mem::transmute(fn_ptr);
+
+    // source.as_raw() is the IUnknown* pointer; AddMediaSource will AddRef it.
+    let source_ptr = source.as_raw() as *mut std::ffi::c_void;
+    f(camera_ptr, source_ptr, std::ptr::null_mut()).ok()
+}
+
 // ── VirtualCamWriter (public API) ─────────────────────────────────────────────
 
 pub struct VirtualCamWriter {
     camera: IMFVirtualCamera,
+    /// Keep the source alive for the lifetime of the virtual camera.
+    _source: IMFMediaSource,
     shared: Arc<StreamShared>,
 }
 
@@ -493,7 +487,8 @@ impl VirtualCamWriter {
             event_queue: source_eq,
             stream: Mutex::new(None),
         };
-        let _source: IMFMediaSource = source_obj.into();
+        // Keep the source alive — it must outlive the virtual camera.
+        let source: IMFMediaSource = source_obj.into();
 
         // Create the virtual camera session.
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
@@ -506,14 +501,19 @@ impl VirtualCamWriter {
             None,
         )?;
 
-        // Note: AddMediaSource not available in stable windows crate
-        // The IMFVirtualCamera needs to be configured differently or requires manual COM bindings
-        // For now, attempting to start without explicit AddMediaSource
+        // Attach our custom IMFMediaSource so Windows uses it to serve frames.
+        // windows-rs 0.58 does not expose IMFVirtualCamera::AddMediaSource, so we
+        // call it directly via the COM vtable.
+        // IMFVirtualCamera vtable layout (Windows 11 22H2, SDK 10.0.22621+):
+        //   slot 0 QueryInterface, 1 AddRef, 2 Release,
+        //   slot 3 AddMediaSource(IUnknown*, IMFAttributes*) -> HRESULT,
+        //   slot 4 Start, 5 Stop, 6 Remove
+        add_media_source_raw(&camera, &source)?;
         camera.Start(None)?;
 
         eprintln!("[vcam] IMFVirtualCamera started ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
 
-        Ok(Self { camera, shared })
+        Ok(Self { camera, _source: source, shared })
     }
 
     /// Write one NV12 frame. Returns false if the virtual camera is gone.
@@ -528,7 +528,7 @@ impl VirtualCamWriter {
         };
 
         // If a RequestSample() token is waiting, deliver this frame now.
-        if let Some(token) = inner.pending_tokens.pop_front() {
+        if let Some(_token) = inner.pending_tokens.pop_front() {
             let sample_time = inner.sample_time;
             inner.sample_time += HNS_PER_SEC / OUTPUT_FPS_N as i64;
 
@@ -537,12 +537,12 @@ impl VirtualCamWriter {
                 let data = nv12.to_vec();
                 let w = self.shared.width;
                 let h = self.shared.height;
-                drop(inner); // release lock before unsafe COM call
+                drop(inner); // release lock before COM call
 
                 unsafe {
                     if let Ok(sample) = build_sample(&data, w, h, sample_time) {
-                        let _ = queue_event_param_unk(
-                            &eq_clone,
+                        // Carry the sample as IUnknown in the MEMediaSample event.
+                        let _ = eq_clone.QueueEventParamUnk(
                             MEMediaSample.0 as u32,
                             &GUID::zeroed(),
                             S_OK,
@@ -550,7 +550,6 @@ impl VirtualCamWriter {
                         );
                     }
                 }
-                let _ = token; // token is passed implicitly via MEMediaSample
                 return true;
             }
         }
