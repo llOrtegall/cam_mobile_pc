@@ -47,7 +47,6 @@ Works with Zoom, Google Meet, Teams, Discord, OBS, and any V4L2-compatible app.
 │  Zoom / Meet / Teams / Discord / OBS → see "AndroidCam" as a webcam         │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
-
 ---
 
 ## Requirements
