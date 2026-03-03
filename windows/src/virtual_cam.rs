@@ -454,31 +454,47 @@ impl VirtualCamWriter {
     /// Returns None if MediaFoundation initialisation fails or if
     /// IMFVirtualCamera is unavailable (Windows < 11 22H2).
     pub fn new(width: u32, height: u32) -> Option<Self> {
-        unsafe { Self::try_new(width, height).ok() }
+        unsafe {
+            match Self::try_new(width, height) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("[vcam] FAILED to create virtual camera: {:#010x} — {}", e.code().0 as u32, e);
+                    None
+                }
+            }
+        }
     }
 
     unsafe fn try_new(width: u32, height: u32) -> Result<Self> {
-        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)?;
+        eprintln!("[vcam] MFStartup...");
+        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)
+            .map_err(|e| { eprintln!("[vcam] MFStartup failed: {:#010x}", e.code().0 as u32); e })?;
 
         let shared = StreamShared::new(width, height);
 
-        // Build NV12 media type and stream/presentation descriptors.
-        let mt = build_nv12_media_type(width, height)?;
+        eprintln!("[vcam] Building media type & descriptors...");
+        let mt = build_nv12_media_type(width, height)
+            .map_err(|e| { eprintln!("[vcam] build_nv12_media_type failed: {:#010x}", e.code().0 as u32); e })?;
         let mt_arr: [Option<IMFMediaType>; 1] = [Some(mt)];
         let stream_desc: IMFStreamDescriptor =
-            MFCreateStreamDescriptor(0, &mt_arr)?;
+            MFCreateStreamDescriptor(0, &mt_arr)
+            .map_err(|e| { eprintln!("[vcam] MFCreateStreamDescriptor failed: {:#010x}", e.code().0 as u32); e })?;
 
-        // Mark stream as selected.
-        let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()?;
+        let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()
+            .map_err(|e| { eprintln!("[vcam] GetMediaTypeHandler failed: {:#010x}", e.code().0 as u32); e })?;
         let mt2 = build_nv12_media_type(width, height)?;
-        handler.SetCurrentMediaType(&mt2)?;
+        handler.SetCurrentMediaType(&mt2)
+            .map_err(|e| { eprintln!("[vcam] SetCurrentMediaType failed: {:#010x}", e.code().0 as u32); e })?;
 
         let sd_arr: [Option<IMFStreamDescriptor>; 1] = [Some(stream_desc.clone())];
         let presentation_desc: IMFPresentationDescriptor =
-            MFCreatePresentationDescriptor(Some(&sd_arr[..]))?;
-        presentation_desc.SelectStream(0)?;
+            MFCreatePresentationDescriptor(Some(&sd_arr[..]))
+            .map_err(|e| { eprintln!("[vcam] MFCreatePresentationDescriptor failed: {:#010x}", e.code().0 as u32); e })?;
+        presentation_desc.SelectStream(0)
+            .map_err(|e| { eprintln!("[vcam] SelectStream failed: {:#010x}", e.code().0 as u32); e })?;
 
-        let source_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
+        let source_eq: IMFMediaEventQueue = MFCreateEventQueue()
+            .map_err(|e| { eprintln!("[vcam] MFCreateEventQueue failed: {:#010x}", e.code().0 as u32); e })?;
 
         let source_obj = AndroidCamSource {
             shared: Arc::clone(&shared),
@@ -487,10 +503,9 @@ impl VirtualCamWriter {
             event_queue: source_eq,
             stream: Mutex::new(None),
         };
-        // Keep the source alive — it must outlive the virtual camera.
         let source: IMFMediaSource = source_obj.into();
 
-        // Create the virtual camera session.
+        eprintln!("[vcam] MFCreateVirtualCamera...");
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
         let camera: IMFVirtualCamera = MFCreateVirtualCamera(
             MFVirtualCameraType_SoftwareCameraSource,
@@ -499,20 +514,17 @@ impl VirtualCamWriter {
             PCWSTR(name.as_ptr()),
             PCWSTR::null(),
             None,
-        )?;
+        ).map_err(|e| { eprintln!("[vcam] MFCreateVirtualCamera failed: {:#010x}", e.code().0 as u32); e })?;
 
-        // Attach our custom IMFMediaSource so Windows uses it to serve frames.
-        // windows-rs 0.58 does not expose IMFVirtualCamera::AddMediaSource, so we
-        // call it directly via the COM vtable.
-        // IMFVirtualCamera vtable layout (Windows 11 22H2, SDK 10.0.22621+):
-        //   slot 0 QueryInterface, 1 AddRef, 2 Release,
-        //   slot 3 AddMediaSource(IUnknown*, IMFAttributes*) -> HRESULT,
-        //   slot 4 Start, 5 Stop, 6 Remove
-        add_media_source_raw(&camera, &source)?;
-        camera.Start(None)?;
+        eprintln!("[vcam] AddMediaSource (vtable slot 3)...");
+        add_media_source_raw(&camera, &source)
+            .map_err(|e| { eprintln!("[vcam] AddMediaSource failed: {:#010x}", e.code().0 as u32); e })?;
 
-        eprintln!("[vcam] IMFVirtualCamera started ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
+        eprintln!("[vcam] camera.Start...");
+        camera.Start(None)
+            .map_err(|e| { eprintln!("[vcam] camera.Start failed: {:#010x}", e.code().0 as u32); e })?;
 
+        eprintln!("[vcam] IMFVirtualCamera started OK ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
         Ok(Self { camera, _source: source, shared })
     }
 
