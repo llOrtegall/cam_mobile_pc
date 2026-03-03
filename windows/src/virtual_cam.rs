@@ -1,28 +1,40 @@
 //! IMFVirtualCamera-based virtual webcam for Windows 11 22H2+.
 //!
-//! # Architecture
+//! # Why dynamic loading?
+//!
+//! windows-rs 0.58 ships an incorrect binding for `IMFVirtualCamera`:
+//! it links from `mfsensorgroup.dll` (driver-level sensor-group API, IID
+//! 1c08a864-...) instead of the user-mode virtual camera API in `Mf.dll`
+//! (IID a925bb0d-04e4-4bdf-9fc5-b5a0efb0ca3c).  Calling `MFCreateVirtualCamera`
+//! via the wrong import gives E_INVALIDARG immediately.
+//!
+//! Fix: we load `Mf.dll` at runtime with `GetProcAddress` and call the correct
+//! `MFCreateVirtualCamera`.  All subsequent operations on the returned COM object
+//! use raw vtable dispatch so we are never confused by the wrong interface type.
+//!
+//! # User-mode IMFVirtualCamera vtable (IID a925bb0d-..., inherits IUnknown)
 //!
 //! ```text
-//! VirtualCamWriter (frame-reader thread)
-//!     │  write_frame(nv12) → stores in StreamShared.latest_frame
-//!     │  if pending token exists → delivers MEMediaSample immediately
-//!     ▼
-//! StreamShared (Arc<Mutex<SharedInner>>)
-//!     ├── latest_frame: Option<Vec<u8>>        ← most recent NV12 frame
-//!     ├── pending_tokens: VecDeque              ← tokens waiting for a frame
-//!     ├── stream_started: bool
-//!     └── event_queue: Option<IMFMediaEventQueue>  ← owned by AndroidCamStream
-//!          ▲
-//! AndroidCamStream (COM — Meet/Zoom/Teams calls RequestSample here)
-//!     │  RequestSample(token):
-//!     │    if frame ready → deliver immediately via MEMediaSample event
-//!     │    else → save token in shared.pending_tokens
-//!     └── GetStreamDescriptor → NV12 1280×720 @30fps MediaType
+//!   0  QueryInterface
+//!   1  AddRef
+//!   2  Release
+//!   3  AddMediaSource(IUnknown*, IMFAttributes*) -> HRESULT
+//!   4  Start(IMFAttributes*)                     -> HRESULT
+//!   5  Stop()                                    -> HRESULT
+//!   6  Remove()                                  -> HRESULT
 //! ```
 //!
-//! # Pixel format
-//! IMFVirtualCamera expects NV12 (MFVideoFormat_NV12).
-//! Conversion from yuv420p is done in ffmpeg.rs before calling write_frame().
+//! # Frame delivery flow
+//!
+//! ```text
+//! VirtualCamWriter::write_frame(nv12)
+//!     └─ if pending token → queue MEMediaSample on stream event queue
+//!     └─ else             → store in latest_frame
+//!
+//! AndroidCamStream::RequestSample(token)
+//!     └─ if frame ready  → queue MEMediaSample immediately
+//!     └─ else            → push token into pending_tokens
+//! ```
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,42 +44,128 @@ use windows::{
     core::*,
     Win32::Foundation::*,
     Win32::Media::MediaFoundation::*,
+    Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW},
 };
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// ── Raw user-mode IMFVirtualCamera handle ─────────────────────────────────────
+//
+// Wraps the raw COM pointer returned by Mf.dll's MFCreateVirtualCamera.
+// We bypass windows-rs type system entirely here because it has the wrong
+// interface definition for IMFVirtualCamera in 0.58.
+
+struct VirtualCamHandle(*mut std::ffi::c_void);
+
+// The frame-reader thread creates VirtualCamWriter which holds VirtualCamHandle.
+unsafe impl Send for VirtualCamHandle {}
+
+impl VirtualCamHandle {
+    #[inline]
+    unsafe fn vtable(&self) -> *const *const () {
+        *(self.0 as *const *const *const ())
+    }
+
+    // Slot 3: AddMediaSource(this, pSource: IUnknown*, pAttributes: IMFAttributes*)
+    unsafe fn add_media_source(&self, source_unk: *mut std::ffi::c_void) -> HRESULT {
+        let f: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*self.vtable().add(3));
+        f(self.0, source_unk, std::ptr::null_mut())
+    }
+
+    // Slot 4: Start(this, pAttributes: IMFAttributes*)
+    unsafe fn start(&self) -> HRESULT {
+        let f: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*self.vtable().add(4));
+        f(self.0, std::ptr::null_mut())
+    }
+
+    // Slot 6: Remove(this)
+    unsafe fn remove(&self) -> HRESULT {
+        let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> HRESULT =
+            std::mem::transmute(*self.vtable().add(6));
+        f(self.0)
+    }
+
+    // Slot 2: Release(this)
+    unsafe fn release_com(&self) -> u32 {
+        let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
+            std::mem::transmute(*self.vtable().add(2));
+        f(self.0)
+    }
+}
+
+impl Drop for VirtualCamHandle {
+    fn drop(&mut self) {
+        if self.0.is_null() { return; }
+        unsafe {
+            let _ = self.remove();
+            self.release_com();
+        }
+    }
+}
+
+// ── Dynamic load of MFCreateVirtualCamera from Mf.dll ────────────────────────
+
+type MFCreateVirtualCameraFn = unsafe extern "system" fn(
+    r#type:         i32,            // MFVirtualCameraType  (0 = SoftwareCameraSource)
+    lifetime:       i32,            // MFVirtualCameraLifetime (0 = Session)
+    access:         i32,            // MFVirtualCameraAccess   (0 = CurrentUser)
+    friendly_name:  *const u16,     // LPCWSTR
+    source_id:      *const u16,     // LPCWSTR (optional, null = auto-generate)
+    categories:     *const GUID,    // optional, null OK
+    category_count: u32,
+    camera:         *mut *mut std::ffi::c_void,  // out: IMFVirtualCamera**
+) -> HRESULT;
+
+unsafe fn load_mf_create_virtual_camera() -> Result<MFCreateVirtualCameraFn> {
+    let hmod = LoadLibraryW(w!("Mf.dll"))
+        .map_err(|e| { eprintln!("[vcam] LoadLibraryW(Mf.dll) failed: {e}"); e })?;
+
+    let proc = GetProcAddress(hmod, PCSTR(b"MFCreateVirtualCamera\0".as_ptr()))
+        .ok_or_else(|| {
+            eprintln!("[vcam] GetProcAddress(MFCreateVirtualCamera) failed");
+            Error::from(E_NOTIMPL)
+        })?;
+
+    Ok(std::mem::transmute(proc))
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const OUTPUT_FPS_N: u32 = 30;
 const OUTPUT_FPS_D: u32 = 1;
-
-// 100-nanosecond units per second
-const HNS_PER_SEC: i64 = 10_000_000;
+const HNS_PER_SEC:  i64 = 10_000_000;
 
 // ── Shared state between writer thread and COM stream ─────────────────────────
 
 struct SharedInner {
-    latest_frame: Option<Vec<u8>>,
+    latest_frame:   Option<Vec<u8>>,
     pending_tokens: VecDeque<Option<IUnknown>>,
-    event_queue: Option<IMFMediaEventQueue>,
+    event_queue:    Option<IMFMediaEventQueue>,
     stream_started: bool,
-    sample_time: i64,  // presentation time in 100ns units
+    sample_time:    i64,
 }
 
 struct StreamShared {
-    inner: Mutex<SharedInner>,
+    inner:   Mutex<SharedInner>,
     running: AtomicBool,
-    width: u32,
-    height: u32,
+    width:   u32,
+    height:  u32,
 }
 
 impl StreamShared {
     fn new(width: u32, height: u32) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(SharedInner {
-                latest_frame: None,
+                latest_frame:   None,
                 pending_tokens: VecDeque::new(),
-                event_queue: None,
+                event_queue:    None,
                 stream_started: false,
-                sample_time: 0,
+                sample_time:    0,
             }),
             running: AtomicBool::new(true),
             width,
@@ -78,67 +176,47 @@ impl StreamShared {
 
 // ── NV12 IMFSample builder ────────────────────────────────────────────────────
 
-unsafe fn build_sample(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    sample_time: i64,
-) -> Result<IMFSample> {
+unsafe fn build_sample(data: &[u8], width: u32, height: u32, sample_time: i64) -> Result<IMFSample> {
     let sample: IMFSample = MFCreateSample()?;
 
     let buffer: IMFMediaBuffer = MFCreate2DMediaBuffer(
-        width,
-        height,
-        // MFVideoFormat_NV12 fourcc: 'N','V','1','2'
-        0x3231564e, // NV12 as little-endian u32
+        width, height,
+        0x3231564e, // NV12 fourcc LE
         FALSE,
     )?;
 
-    // Lock the 2D buffer and copy NV12 data into it.
     let buffer_2d: IMF2DBuffer2 = buffer.cast()?;
     let mut dst_scan0 = std::ptr::null_mut::<u8>();
     let mut dst_pitch: i32 = 0;
-    let mut buffer_start = std::ptr::null_mut::<u8>();
-    let mut buffer_len: u32 = 0;
+    let mut buf_start = std::ptr::null_mut::<u8>();
+    let mut buf_len: u32 = 0;
     buffer_2d.Lock2DSize(
         MF2DBuffer_LockFlags_Write,
-        &mut dst_scan0,
-        &mut dst_pitch,
-        &mut buffer_start,
-        &mut buffer_len,
+        &mut dst_scan0, &mut dst_pitch,
+        &mut buf_start, &mut buf_len,
     )?;
 
-    let y_size = (width * height) as usize;
+    let y_size  = (width * height) as usize;
     let uv_size = y_size / 2;
 
-    // Copy Y plane row by row (pitch may differ from width).
     for row in 0..height as usize {
-        let src_row = &data[row * width as usize..(row + 1) * width as usize];
-        let dst_ptr = dst_scan0.add(row * dst_pitch as usize);
-        std::ptr::copy_nonoverlapping(src_row.as_ptr(), dst_ptr, width as usize);
+        let src = &data[row * width as usize..(row + 1) * width as usize];
+        let dst = dst_scan0.add(row * dst_pitch as usize);
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, width as usize);
     }
-
-    // Copy UV plane row by row (NV12: height/2 rows of width bytes).
     let uv_src = &data[y_size..y_size + uv_size];
-    let uv_rows = height as usize / 2;
     let uv_dst_base = dst_scan0.add(height as usize * dst_pitch as usize);
-    for row in 0..uv_rows {
-        let src_row = &uv_src[row * width as usize..(row + 1) * width as usize];
-        let dst_ptr = uv_dst_base.add(row * dst_pitch as usize);
-        std::ptr::copy_nonoverlapping(src_row.as_ptr(), dst_ptr, width as usize);
+    for row in 0..height as usize / 2 {
+        let src = &uv_src[row * width as usize..(row + 1) * width as usize];
+        let dst = uv_dst_base.add(row * dst_pitch as usize);
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, width as usize);
     }
 
     buffer_2d.Unlock2D()?;
-
-    // Set current length so MF knows how many bytes are valid.
     buffer.SetCurrentLength((y_size + uv_size) as u32)?;
-
     sample.AddBuffer(&buffer)?;
     sample.SetSampleTime(sample_time)?;
-    // Frame duration in 100ns units.
-    let duration = HNS_PER_SEC / OUTPUT_FPS_N as i64;
-    sample.SetSampleDuration(duration)?;
-
+    sample.SetSampleDuration(HNS_PER_SEC / OUTPUT_FPS_N as i64)?;
     Ok(sample)
 }
 
@@ -147,23 +225,12 @@ unsafe fn build_sample(
 unsafe fn build_nv12_media_type(width: u32, height: u32) -> Result<IMFMediaType> {
     let mt: IMFMediaType = MFCreateMediaType()?;
     mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-    mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-
-    // Pack width and height into a single u64 attribute (high=width, low=height).
-    let wh: u64 = ((width as u64) << 32) | (height as u64);
-    mt.SetUINT64(&MF_MT_FRAME_SIZE, wh)?;
-
-    // Frame rate: numerator in high 32 bits, denominator in low 32 bits.
-    let fps: u64 = ((OUTPUT_FPS_N as u64) << 32) | (OUTPUT_FPS_D as u64);
-    mt.SetUINT64(&MF_MT_FRAME_RATE, fps)?;
-
-    // Pixel aspect ratio 1:1.
-    let par: u64 = (1u64 << 32) | 1u64;
-    mt.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, par)?;
-
-    mt.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+    mt.SetGUID(&MF_MT_SUBTYPE,    &MFVideoFormat_NV12)?;
+    mt.SetUINT64(&MF_MT_FRAME_SIZE,        ((width as u64) << 32) | (height as u64))?;
+    mt.SetUINT64(&MF_MT_FRAME_RATE,        ((OUTPUT_FPS_N as u64) << 32) | (OUTPUT_FPS_D as u64))?;
+    mt.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1u64)?;
+    mt.SetUINT32(&MF_MT_INTERLACE_MODE,    MFVideoInterlace_Progressive.0 as u32)?;
     mt.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
-
     Ok(mt)
 }
 
@@ -171,65 +238,43 @@ unsafe fn build_nv12_media_type(width: u32, height: u32) -> Result<IMFMediaType>
 
 #[implement(IMFMediaStream, IMFMediaEventGenerator)]
 struct AndroidCamStream {
-    shared: Arc<StreamShared>,
+    shared:      Arc<StreamShared>,
     stream_desc: IMFStreamDescriptor,
-    source: IMFMediaSource,
+    source:      IMFMediaSource,
 }
 
 impl IMFMediaEventGenerator_Impl for AndroidCamStream_Impl {
     fn GetEvent(&self, dwflags: MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS) -> Result<IMFMediaEvent> {
-        let queue = {
-            let inner = self.shared.inner.lock().unwrap();
-            inner.event_queue.clone()
-        };
-        match queue {
+        let q = self.shared.inner.lock().unwrap().event_queue.clone();
+        match q {
             Some(q) => unsafe { q.GetEvent(dwflags.0) },
-            None => Err(MF_E_SHUTDOWN.into()),
+            None    => Err(MF_E_SHUTDOWN.into()),
         }
     }
 
-    fn BeginGetEvent(
-        &self,
-        pcallback: Option<&IMFAsyncCallback>,
-        punkstate: Option<&IUnknown>,
-    ) -> Result<()> {
-        let queue = {
-            let inner = self.shared.inner.lock().unwrap();
-            inner.event_queue.clone()
-        };
-        match queue {
+    fn BeginGetEvent(&self, pcallback: Option<&IMFAsyncCallback>, punkstate: Option<&IUnknown>) -> Result<()> {
+        let q = self.shared.inner.lock().unwrap().event_queue.clone();
+        match q {
             Some(q) => unsafe { q.BeginGetEvent(pcallback, punkstate) },
-            None => Err(MF_E_SHUTDOWN.into()),
+            None    => Err(MF_E_SHUTDOWN.into()),
         }
     }
 
     fn EndGetEvent(&self, presult: Option<&IMFAsyncResult>) -> Result<IMFMediaEvent> {
-        let queue = {
-            let inner = self.shared.inner.lock().unwrap();
-            inner.event_queue.clone()
-        };
-        match queue {
+        let q = self.shared.inner.lock().unwrap().event_queue.clone();
+        match q {
             Some(q) => unsafe { q.EndGetEvent(presult) },
-            None => Err(MF_E_SHUTDOWN.into()),
+            None    => Err(MF_E_SHUTDOWN.into()),
         }
     }
 
-    fn QueueEvent(
-        &self,
-        met: u32,
-        guidextendedtype: *const GUID,
-        hrstatus: HRESULT,
-        pvvalue: *const PROPVARIANT,
-    ) -> Result<()> {
-        let queue = {
-            let inner = self.shared.inner.lock().unwrap();
-            inner.event_queue.clone()
-        };
-        let pv_opt = if pvvalue.is_null() { None } else { Some(pvvalue) };
-        match queue {
+    fn QueueEvent(&self, met: u32, guidextendedtype: *const GUID, hrstatus: HRESULT, pvvalue: *const PROPVARIANT) -> Result<()> {
+        let q = self.shared.inner.lock().unwrap().event_queue.clone();
+        let pv = if pvvalue.is_null() { None } else { Some(pvvalue) };
+        match q {
             Some(q) => unsafe {
-                let event = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv_opt)?;
-                q.QueueEvent(&event)
+                let ev = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv)?;
+                q.QueueEvent(&ev)
             },
             None => Err(MF_E_SHUTDOWN.into()),
         }
@@ -251,11 +296,9 @@ impl IMFMediaStream_Impl for AndroidCamStream_Impl {
         }
 
         let token_clone: Option<IUnknown> = ptoken.cloned();
-
         let mut inner = self.shared.inner.lock().unwrap();
 
         if let Some(frame_data) = inner.latest_frame.take() {
-            // Frame available — deliver immediately.
             let sample_time = inner.sample_time;
             inner.sample_time += HNS_PER_SEC / OUTPUT_FPS_N as i64;
             let eq = inner.event_queue.clone();
@@ -263,26 +306,13 @@ impl IMFMediaStream_Impl for AndroidCamStream_Impl {
 
             if let Some(q) = eq {
                 unsafe {
-                    let sample = build_sample(
-                        &frame_data,
-                        self.shared.width,
-                        self.shared.height,
-                        sample_time,
-                    )?;
-                    // Carry the sample as IUnknown in the MEMediaSample event.
-                    q.QueueEventParamUnk(
-                        MEMediaSample.0 as u32,
-                        &GUID::zeroed(),
-                        S_OK,
-                        &sample,
-                    )?;
+                    let sample = build_sample(&frame_data, self.shared.width, self.shared.height, sample_time)?;
+                    q.QueueEventParamUnk(MEMediaSample.0 as u32, &GUID::zeroed(), S_OK, &sample)?;
                 }
             }
         } else {
-            // No frame yet — save the token; write_frame() will satisfy it.
             inner.pending_tokens.push_back(token_clone);
         }
-
         Ok(())
     }
 }
@@ -291,11 +321,11 @@ impl IMFMediaStream_Impl for AndroidCamStream_Impl {
 
 #[implement(IMFMediaSource, IMFMediaEventGenerator)]
 struct AndroidCamSource {
-    shared: Arc<StreamShared>,
+    shared:            Arc<StreamShared>,
     presentation_desc: IMFPresentationDescriptor,
-    stream_desc: IMFStreamDescriptor,
-    event_queue: IMFMediaEventQueue,
-    stream: Mutex<Option<IMFMediaStream>>,
+    stream_desc:       IMFStreamDescriptor,
+    event_queue:       IMFMediaEventQueue,
+    stream:            Mutex<Option<IMFMediaStream>>,
 }
 
 impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
@@ -303,11 +333,7 @@ impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
         unsafe { self.event_queue.GetEvent(dwflags.0) }
     }
 
-    fn BeginGetEvent(
-        &self,
-        pcallback: Option<&IMFAsyncCallback>,
-        punkstate: Option<&IUnknown>,
-    ) -> Result<()> {
+    fn BeginGetEvent(&self, pcallback: Option<&IMFAsyncCallback>, punkstate: Option<&IUnknown>) -> Result<()> {
         unsafe { self.event_queue.BeginGetEvent(pcallback, punkstate) }
     }
 
@@ -315,17 +341,11 @@ impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
         unsafe { self.event_queue.EndGetEvent(presult) }
     }
 
-    fn QueueEvent(
-        &self,
-        met: u32,
-        guidextendedtype: *const GUID,
-        hrstatus: HRESULT,
-        pvvalue: *const PROPVARIANT,
-    ) -> Result<()> {
-        let pv_opt = if pvvalue.is_null() { None } else { Some(pvvalue) };
+    fn QueueEvent(&self, met: u32, guidextendedtype: *const GUID, hrstatus: HRESULT, pvvalue: *const PROPVARIANT) -> Result<()> {
+        let pv = if pvvalue.is_null() { None } else { Some(pvvalue) };
         unsafe {
-            let event = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv_opt)?;
-            self.event_queue.QueueEvent(&event)
+            let ev = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv)?;
+            self.event_queue.QueueEvent(&ev)
         }
     }
 }
@@ -341,72 +361,50 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
 
     fn Start(
         &self,
-        pdescriptor: Option<&IMFPresentationDescriptor>,
-        _pguidtimeformat: *const GUID,
+        _pdescriptor:       Option<&IMFPresentationDescriptor>,
+        _pguidtimeformat:   *const GUID,
         _pvarstartposition: *const PROPVARIANT,
     ) -> Result<()> {
-        let _ = pdescriptor;
-
-        // Create the stream COM object.
         let source_intf: IMFMediaSource = unsafe { self.cast()? };
         let stream_obj = AndroidCamStream {
-            shared: Arc::clone(&self.shared),
+            shared:      Arc::clone(&self.shared),
             stream_desc: self.stream_desc.clone(),
-            source: source_intf,
+            source:      source_intf,
         };
         let stream: IMFMediaStream = stream_obj.into();
 
-        // Create a dedicated event queue for the stream and publish it to shared
-        // state so that RequestSample / write_frame can post MEMediaSample events.
+        // Dedicated event queue for the stream — BeginGetEvent/RequestSample
+        // both operate on this queue.
         let stream_eq: IMFMediaEventQueue = unsafe { MFCreateEventQueue()? };
         {
             let mut inner = self.shared.inner.lock().unwrap();
-            inner.event_queue = Some(stream_eq);
+            inner.event_queue    = Some(stream_eq);
             inner.stream_started = true;
         }
-
         *self.stream.lock().unwrap() = Some(stream.clone());
 
-        // Fire MENewStream (must carry the stream as IUnknown so the pipeline
-        // can call BeginGetEvent / RequestSample on it).
+        // MENewStream must carry the stream IUnknown so the pipeline can call
+        // BeginGetEvent / RequestSample on it.
         let stream_unk: IUnknown = stream.cast()?;
         unsafe {
             self.event_queue.QueueEventParamUnk(
-                MENewStream.0 as u32,
-                &GUID::zeroed(),
-                S_OK,
-                &stream_unk,
+                MENewStream.0 as u32, &GUID::zeroed(), S_OK, &stream_unk,
             )?;
-
-            let event = MFCreateMediaEvent(
-                MESourceStarted.0 as u32,
-                &GUID::zeroed(),
-                S_OK,
-                None,
-            )?;
-            self.event_queue.QueueEvent(&event)?;
+            let ev = MFCreateMediaEvent(MESourceStarted.0 as u32, &GUID::zeroed(), S_OK, None)?;
+            self.event_queue.QueueEvent(&ev)?;
         }
-
         Ok(())
     }
 
     fn Stop(&self) -> Result<()> {
         unsafe {
-            let event = MFCreateMediaEvent(
-                MESourceStopped.0 as u32,
-                &GUID::zeroed(),
-                S_OK,
-                None,
-            )?;
-            self.event_queue.QueueEvent(&event)?;
+            let ev = MFCreateMediaEvent(MESourceStopped.0 as u32, &GUID::zeroed(), S_OK, None)?;
+            self.event_queue.QueueEvent(&ev)?;
         }
         Ok(())
     }
 
-    fn Pause(&self) -> Result<()> {
-        // Live source — pause is a no-op.
-        Ok(())
-    }
+    fn Pause(&self) -> Result<()> { Ok(()) }
 
     fn Shutdown(&self) -> Result<()> {
         self.shared.running.store(false, Ordering::SeqCst);
@@ -415,50 +413,22 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
     }
 }
 
-// ── Raw vtable call for IMFVirtualCamera::AddMediaSource ─────────────────────
-//
-// windows-rs 0.58 does not expose AddMediaSource on IMFVirtualCamera.
-// The Windows 11 22H2 COM vtable layout is:
-//   0 QueryInterface  1 AddRef  2 Release
-//   3 AddMediaSource(IUnknown*, IMFAttributes*) -> HRESULT
-//   4 Start  5 Stop  6 Remove
-unsafe fn add_media_source_raw(camera: &IMFVirtualCamera, source: &IMFMediaSource) -> Result<()> {
-    type AddMediaSourceFn = unsafe extern "system" fn(
-        *mut std::ffi::c_void,  // this
-        *mut std::ffi::c_void,  // pMediaSource (IUnknown*)
-        *mut std::ffi::c_void,  // pAttributes  (IMFAttributes*, nullable)
-    ) -> HRESULT;
-
-    let camera_ptr = camera.as_raw() as *mut std::ffi::c_void;
-    let vtable = *(camera_ptr as *const *const *const std::ffi::c_void);
-    let fn_ptr = *vtable.add(3);
-    let f: AddMediaSourceFn = std::mem::transmute(fn_ptr);
-
-    // source.as_raw() is the IUnknown* pointer; AddMediaSource will AddRef it.
-    let source_ptr = source.as_raw() as *mut std::ffi::c_void;
-    f(camera_ptr, source_ptr, std::ptr::null_mut()).ok()
-}
-
 // ── VirtualCamWriter (public API) ─────────────────────────────────────────────
 
 pub struct VirtualCamWriter {
-    camera: IMFVirtualCamera,
-    /// Keep the source alive for the lifetime of the virtual camera.
+    camera:  VirtualCamHandle,
+    /// Keep the COM source alive for the lifetime of the virtual camera.
     _source: IMFMediaSource,
-    shared: Arc<StreamShared>,
+    shared:  Arc<StreamShared>,
 }
 
 impl VirtualCamWriter {
-    /// Create a new virtual camera that appears as "AndroidCam" in Windows.
-    ///
-    /// Returns None if MediaFoundation initialisation fails or if
-    /// IMFVirtualCamera is unavailable (Windows < 11 22H2).
     pub fn new(width: u32, height: u32) -> Option<Self> {
         unsafe {
             match Self::try_new(width, height) {
-                Ok(v) => Some(v),
+                Ok(v)  => Some(v),
                 Err(e) => {
-                    eprintln!("[vcam] FAILED to create virtual camera: {:#010x} — {}", e.code().0 as u32, e);
+                    eprintln!("[vcam] FAILED: {:#010x} — {e}", e.code().0 as u32);
                     None
                 }
             }
@@ -467,35 +437,24 @@ impl VirtualCamWriter {
 
     unsafe fn try_new(width: u32, height: u32) -> Result<Self> {
         eprintln!("[vcam] MFStartup...");
-        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)
-            .map_err(|e| { eprintln!("[vcam] MFStartup failed: {:#010x}", e.code().0 as u32); e })?;
+        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)?;
 
+        eprintln!("[vcam] Building MF objects...");
         let shared = StreamShared::new(width, height);
 
-        eprintln!("[vcam] Building media type & descriptors...");
-        let mt = build_nv12_media_type(width, height)
-            .map_err(|e| { eprintln!("[vcam] build_nv12_media_type failed: {:#010x}", e.code().0 as u32); e })?;
-        let mt_arr: [Option<IMFMediaType>; 1] = [Some(mt)];
-        let stream_desc: IMFStreamDescriptor =
-            MFCreateStreamDescriptor(0, &mt_arr)
-            .map_err(|e| { eprintln!("[vcam] MFCreateStreamDescriptor failed: {:#010x}", e.code().0 as u32); e })?;
+        let mt  = build_nv12_media_type(width, height)?;
+        let mts: [Option<IMFMediaType>; 1] = [Some(mt)];
+        let stream_desc: IMFStreamDescriptor = MFCreateStreamDescriptor(0, &mts)?;
 
-        let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()
-            .map_err(|e| { eprintln!("[vcam] GetMediaTypeHandler failed: {:#010x}", e.code().0 as u32); e })?;
-        let mt2 = build_nv12_media_type(width, height)?;
-        handler.SetCurrentMediaType(&mt2)
-            .map_err(|e| { eprintln!("[vcam] SetCurrentMediaType failed: {:#010x}", e.code().0 as u32); e })?;
+        let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()?;
+        handler.SetCurrentMediaType(&build_nv12_media_type(width, height)?)?;
 
-        let sd_arr: [Option<IMFStreamDescriptor>; 1] = [Some(stream_desc.clone())];
+        let sds: [Option<IMFStreamDescriptor>; 1] = [Some(stream_desc.clone())];
         let presentation_desc: IMFPresentationDescriptor =
-            MFCreatePresentationDescriptor(Some(&sd_arr[..]))
-            .map_err(|e| { eprintln!("[vcam] MFCreatePresentationDescriptor failed: {:#010x}", e.code().0 as u32); e })?;
-        presentation_desc.SelectStream(0)
-            .map_err(|e| { eprintln!("[vcam] SelectStream failed: {:#010x}", e.code().0 as u32); e })?;
+            MFCreatePresentationDescriptor(Some(&sds[..]))?;
+        presentation_desc.SelectStream(0)?;
 
-        let source_eq: IMFMediaEventQueue = MFCreateEventQueue()
-            .map_err(|e| { eprintln!("[vcam] MFCreateEventQueue failed: {:#010x}", e.code().0 as u32); e })?;
-
+        let source_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
         let source_obj = AndroidCamSource {
             shared: Arc::clone(&shared),
             presentation_desc,
@@ -505,26 +464,36 @@ impl VirtualCamWriter {
         };
         let source: IMFMediaSource = source_obj.into();
 
-        eprintln!("[vcam] MFCreateVirtualCamera...");
+        // Load MFCreateVirtualCamera from the correct DLL (Mf.dll, not mfsensorgroup.dll).
+        eprintln!("[vcam] Loading MFCreateVirtualCamera from Mf.dll...");
+        let create_fn = load_mf_create_virtual_camera()?;
+
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
-        let camera: IMFVirtualCamera = MFCreateVirtualCamera(
-            MFVirtualCameraType_SoftwareCameraSource,
-            MFVirtualCameraLifetime_Session,
-            MFVirtualCameraAccess_CurrentUser,
-            PCWSTR(name.as_ptr()),
-            PCWSTR::null(),
-            None,
-        ).map_err(|e| { eprintln!("[vcam] MFCreateVirtualCamera failed: {:#010x}", e.code().0 as u32); e })?;
+        let mut cam_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
-        eprintln!("[vcam] AddMediaSource (vtable slot 3)...");
-        add_media_source_raw(&camera, &source)
-            .map_err(|e| { eprintln!("[vcam] AddMediaSource failed: {:#010x}", e.code().0 as u32); e })?;
+        eprintln!("[vcam] Calling MFCreateVirtualCamera...");
+        create_fn(
+            0, // MFVirtualCameraType_SoftwareCameraSource
+            0, // MFVirtualCameraLifetime_Session
+            0, // MFVirtualCameraAccess_CurrentUser
+            name.as_ptr(),
+            std::ptr::null(),  // sourceId — auto-generate
+            std::ptr::null(),  // categories
+            0,
+            &mut cam_ptr,
+        ).ok().map_err(|e| { eprintln!("[vcam] MFCreateVirtualCamera failed: {e}"); e })?;
 
-        eprintln!("[vcam] camera.Start...");
-        camera.Start(None)
-            .map_err(|e| { eprintln!("[vcam] camera.Start failed: {:#010x}", e.code().0 as u32); e })?;
+        let camera = VirtualCamHandle(cam_ptr);
 
-        eprintln!("[vcam] IMFVirtualCamera started OK ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
+        eprintln!("[vcam] AddMediaSource...");
+        camera.add_media_source(source.as_raw() as *mut _)
+            .ok().map_err(|e| { eprintln!("[vcam] AddMediaSource failed: {e}"); e })?;
+
+        eprintln!("[vcam] Start...");
+        camera.start()
+            .ok().map_err(|e| { eprintln!("[vcam] Start failed: {e}"); e })?;
+
+        eprintln!("[vcam] IMFVirtualCamera ready ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
         Ok(Self { camera, _source: source, shared })
     }
 
@@ -533,13 +502,11 @@ impl VirtualCamWriter {
         if !self.shared.running.load(Ordering::SeqCst) {
             return false;
         }
-
         let mut inner = match self.shared.inner.lock() {
-            Ok(g) => g,
+            Ok(g)  => g,
             Err(_) => return false,
         };
 
-        // If a RequestSample() token is waiting, deliver this frame now.
         if let Some(_token) = inner.pending_tokens.pop_front() {
             let sample_time = inner.sample_time;
             inner.sample_time += HNS_PER_SEC / OUTPUT_FPS_N as i64;
@@ -547,18 +514,13 @@ impl VirtualCamWriter {
             if let Some(ref eq) = inner.event_queue {
                 let eq_clone = eq.clone();
                 let data = nv12.to_vec();
-                let w = self.shared.width;
-                let h = self.shared.height;
-                drop(inner); // release lock before COM call
+                let (w, h) = (self.shared.width, self.shared.height);
+                drop(inner);
 
                 unsafe {
                     if let Ok(sample) = build_sample(&data, w, h, sample_time) {
-                        // Carry the sample as IUnknown in the MEMediaSample event.
                         let _ = eq_clone.QueueEventParamUnk(
-                            MEMediaSample.0 as u32,
-                            &GUID::zeroed(),
-                            S_OK,
-                            &sample,
+                            MEMediaSample.0 as u32, &GUID::zeroed(), S_OK, &sample,
                         );
                     }
                 }
@@ -566,7 +528,6 @@ impl VirtualCamWriter {
             }
         }
 
-        // No pending token — store frame for the next RequestSample() call.
         inner.latest_frame = Some(nv12.to_vec());
         true
     }
@@ -575,10 +536,8 @@ impl VirtualCamWriter {
 impl Drop for VirtualCamWriter {
     fn drop(&mut self) {
         self.shared.running.store(false, Ordering::SeqCst);
-        unsafe {
-            let _ = self.camera.Remove();
-            let _ = MFShutdown();
-        }
-        eprintln!("[vcam] IMFVirtualCamera removed");
+        // camera.drop() calls Remove() + Release() via VirtualCamHandle::drop()
+        unsafe { let _ = MFShutdown(); }
+        eprintln!("[vcam] VirtualCamWriter dropped");
     }
 }
