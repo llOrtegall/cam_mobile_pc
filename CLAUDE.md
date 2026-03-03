@@ -35,6 +35,7 @@ FFmpeg is a subprocess on both platforms. The egui/eframe UI is identical.
 
 ## Commands
 
+
 ### Build — Linux (Rust)
 
 ```bash
