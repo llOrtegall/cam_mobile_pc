@@ -8,9 +8,10 @@
 //! (IID a925bb0d-04e4-4bdf-9fc5-b5a0efb0ca3c).  Calling `MFCreateVirtualCamera`
 //! via the wrong import gives E_INVALIDARG immediately.
 //!
-//! Fix: we load `Mf.dll` at runtime with `GetProcAddress` and call the correct
-//! `MFCreateVirtualCamera`.  All subsequent operations on the returned COM object
-//! use raw vtable dispatch so we are never confused by the wrong interface type.
+//! Fix: we load `mfsensorgroup.dll` at runtime with `GetProcAddress` (the correct
+//! DLL per MSDN) and call `MFCreateVirtualCamera` directly.  All subsequent
+//! operations on the returned COM object use raw vtable dispatch with the correct
+//! IID `a925bb0d-...` so we are not affected by windows-rs 0.58's wrong interface.
 //!
 //! # User-mode IMFVirtualCamera vtable (IID a925bb0d-..., inherits IUnknown)
 //!
@@ -108,7 +109,7 @@ impl Drop for VirtualCamHandle {
     }
 }
 
-// ── Dynamic load of MFCreateVirtualCamera from Mf.dll ────────────────────────
+// ── Dynamic load of MFCreateVirtualCamera from mfsensorgroup.dll ─────────────
 
 type MFCreateVirtualCameraFn = unsafe extern "system" fn(
     r#type:         i32,            // MFVirtualCameraType  (0 = SoftwareCameraSource)
@@ -122,8 +123,8 @@ type MFCreateVirtualCameraFn = unsafe extern "system" fn(
 ) -> HRESULT;
 
 unsafe fn load_mf_create_virtual_camera() -> Result<MFCreateVirtualCameraFn> {
-    let hmod = LoadLibraryW(w!("Mf.dll"))
-        .map_err(|e| { eprintln!("[vcam] LoadLibraryW(Mf.dll) failed: {e}"); e })?;
+    let hmod = LoadLibraryW(w!("mfsensorgroup.dll"))
+        .map_err(|e| { eprintln!("[vcam] LoadLibraryW(mfsensorgroup.dll) failed: {e}"); e })?;
 
     let proc = GetProcAddress(hmod, PCSTR(b"MFCreateVirtualCamera\0".as_ptr()))
         .ok_or_else(|| {
@@ -465,14 +466,14 @@ impl VirtualCamWriter {
         let source: IMFMediaSource = source_obj.into();
 
         // Load MFCreateVirtualCamera from the correct DLL (Mf.dll, not mfsensorgroup.dll).
-        eprintln!("[vcam] Loading MFCreateVirtualCamera from Mf.dll...");
+        eprintln!("[vcam] Loading MFCreateVirtualCamera from mfsensorgroup.dll...");
         let create_fn = load_mf_create_virtual_camera()?;
 
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
         let mut cam_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
         eprintln!("[vcam] Calling MFCreateVirtualCamera...");
-        create_fn(
+        let hr = create_fn(
             0, // MFVirtualCameraType_SoftwareCameraSource
             0, // MFVirtualCameraLifetime_Session
             0, // MFVirtualCameraAccess_CurrentUser
@@ -481,7 +482,14 @@ impl VirtualCamWriter {
             std::ptr::null(),  // categories
             0,
             &mut cam_ptr,
-        ).ok().map_err(|e| { eprintln!("[vcam] MFCreateVirtualCamera failed: {e}"); e })?;
+        );
+        if hr == HRESULT(0x80070057u32 as i32) {
+            eprintln!("[vcam] MFCreateVirtualCamera failed: E_INVALIDARG (0x80070057)");
+            eprintln!("[vcam] HINT: Enable Developer Mode in Windows Settings →");
+            eprintln!("[vcam]       Privacy & Security → For developers → Developer Mode");
+            return Err(hr.into());
+        }
+        hr.ok().map_err(|e| { eprintln!("[vcam] MFCreateVirtualCamera failed: {e}"); e })?;
 
         let camera = VirtualCamHandle(cam_ptr);
 
