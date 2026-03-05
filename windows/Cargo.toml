@@ -26,6 +26,8 @@ windows = { version = "0.58", features = [
     "implement",
 ] }
 windows-core = "0.58"
+log = "0.4"
+simplelog = "0.12"
 
 [profile.release]
 opt-level = 3
