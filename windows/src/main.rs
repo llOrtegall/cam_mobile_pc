@@ -452,7 +452,20 @@ fn apply_theme(ctx: &egui::Context) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+fn init_logger() {
+    use simplelog::{LevelFilter, WriteLogger};
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let log_dir = std::path::PathBuf::from(appdata).join("campc");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("campc.log");
+    if let Ok(file) = std::fs::File::create(&log_path) {
+        let _ = WriteLogger::init(LevelFilter::Info, simplelog::Config::default(), file);
+        log::info!("CamPC started — log: {}", log_path.display());
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    init_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("CamPC")
