@@ -37,6 +37,7 @@
 //!     └─ else            → push token into pending_tokens
 //! ```
 
+use log::{error, info};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -124,11 +125,11 @@ type MFCreateVirtualCameraFn = unsafe extern "system" fn(
 
 unsafe fn load_mf_create_virtual_camera() -> Result<MFCreateVirtualCameraFn> {
     let hmod = LoadLibraryW(w!("mfsensorgroup.dll"))
-        .map_err(|e| { eprintln!("[vcam] LoadLibraryW(mfsensorgroup.dll) failed: {e}"); e })?;
+        .map_err(|e| { error!("[vcam] LoadLibraryW(mfsensorgroup.dll) failed: {e}"); e })?;
 
     let proc = GetProcAddress(hmod, PCSTR(b"MFCreateVirtualCamera\0".as_ptr()))
         .ok_or_else(|| {
-            eprintln!("[vcam] GetProcAddress(MFCreateVirtualCamera) failed");
+            error!("[vcam] GetProcAddress(MFCreateVirtualCamera) failed");
             Error::from(E_NOTIMPL)
         })?;
 
@@ -429,7 +430,7 @@ impl VirtualCamWriter {
             match Self::try_new(width, height) {
                 Ok(v)  => Some(v),
                 Err(e) => {
-                    eprintln!("[vcam] FAILED: {:#010x} — {e}", e.code().0 as u32);
+                    error!("[vcam] FAILED: {:#010x} — {e}", e.code().0 as u32);
                     None
                 }
             }
@@ -437,10 +438,10 @@ impl VirtualCamWriter {
     }
 
     unsafe fn try_new(width: u32, height: u32) -> Result<Self> {
-        eprintln!("[vcam] MFStartup...");
+        info!("[vcam] MFStartup...");
         MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)?;
 
-        eprintln!("[vcam] Building MF objects...");
+        info!("[vcam] Building MF objects...");
         let shared = StreamShared::new(width, height);
 
         let mt  = build_nv12_media_type(width, height)?;
@@ -466,13 +467,13 @@ impl VirtualCamWriter {
         let source: IMFMediaSource = source_obj.into();
 
         // Load MFCreateVirtualCamera from the correct DLL (Mf.dll, not mfsensorgroup.dll).
-        eprintln!("[vcam] Loading MFCreateVirtualCamera from mfsensorgroup.dll...");
+        info!("[vcam] Loading MFCreateVirtualCamera from mfsensorgroup.dll...");
         let create_fn = load_mf_create_virtual_camera()?;
 
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
         let mut cam_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
-        eprintln!("[vcam] Calling MFCreateVirtualCamera...");
+        info!("[vcam] Calling MFCreateVirtualCamera...");
         let hr = create_fn(
             0, // MFVirtualCameraType_SoftwareCameraSource
             0, // MFVirtualCameraLifetime_Session
@@ -484,24 +485,23 @@ impl VirtualCamWriter {
             &mut cam_ptr,
         );
         if hr == HRESULT(0x80070057u32 as i32) {
-            eprintln!("[vcam] MFCreateVirtualCamera failed: E_INVALIDARG (0x80070057)");
-            eprintln!("[vcam] HINT: Enable Developer Mode in Windows Settings →");
-            eprintln!("[vcam]       Privacy & Security → For developers → Developer Mode");
+            error!("[vcam] MFCreateVirtualCamera failed: E_INVALIDARG (0x80070057)");
+            error!("[vcam] HINT: Enable Developer Mode in Windows Settings → Privacy & Security → For developers → Developer Mode");
             return Err(hr.into());
         }
-        hr.ok().map_err(|e| { eprintln!("[vcam] MFCreateVirtualCamera failed: {e}"); e })?;
+        hr.ok().map_err(|e| { error!("[vcam] MFCreateVirtualCamera failed: {e}"); e })?;
 
         let camera = VirtualCamHandle(cam_ptr);
 
-        eprintln!("[vcam] AddMediaSource...");
+        info!("[vcam] AddMediaSource...");
         camera.add_media_source(source.as_raw() as *mut _)
-            .ok().map_err(|e| { eprintln!("[vcam] AddMediaSource failed: {e}"); e })?;
+            .ok().map_err(|e| { error!("[vcam] AddMediaSource failed: {e}"); e })?;
 
-        eprintln!("[vcam] Start...");
+        info!("[vcam] Start...");
         camera.start()
-            .ok().map_err(|e| { eprintln!("[vcam] Start failed: {e}"); e })?;
+            .ok().map_err(|e| { error!("[vcam] Start failed: {e}"); e })?;
 
-        eprintln!("[vcam] IMFVirtualCamera ready ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
+        info!("[vcam] IMFVirtualCamera ready ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
         Ok(Self { camera, _source: source, shared })
     }
 
@@ -546,6 +546,6 @@ impl Drop for VirtualCamWriter {
         self.shared.running.store(false, Ordering::SeqCst);
         // camera.drop() calls Remove() + Release() via VirtualCamHandle::drop()
         unsafe { let _ = MFShutdown(); }
-        eprintln!("[vcam] VirtualCamWriter dropped");
+        info!("[vcam] VirtualCamWriter dropped");
     }
 }
