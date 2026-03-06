@@ -142,6 +142,32 @@ const OUTPUT_FPS_N: u32 = 30;
 const OUTPUT_FPS_D: u32 = 1;
 const HNS_PER_SEC:  i64 = 10_000_000;
 
+// Unique source ID for AndroidCamSource. MFCreateVirtualCamera requires a
+// non-null GUID string to identify the virtual camera source; this value is
+// fixed so the same camera is re-opened across calls within a session.
+const ANDROID_CAM_SOURCE_ID: &str = "{5B9A4C2D-8E1F-4A3B-9C7D-0F2E1A5B6C4D}\0";
+
+// MF_DEVICESTREAM_STREAM_ID  {11CA3D03-4A3B-4CF3-8938-8A8E0F0F0A56}
+// Must be set on each stream descriptor; AddMediaSource validates it via
+// IMFMediaSourceEx::GetStreamAttributes().
+const MF_DEVICESTREAM_STREAM_ID_ATTR: GUID = GUID {
+    data1: 0x11CA3D03, data2: 0x4A3B, data3: 0x4CF3,
+    data4: [0x89, 0x38, 0x8A, 0x8E, 0x0F, 0x0F, 0x0A, 0x56],
+};
+
+// MF_DEVICESTREAM_STREAM_CATEGORY  {149C20AC-2B6C-4C2B-8B37-3E47B88DA38B}
+// Value must be PINNAME_VIDEO_CAPTURE to identify this as a video stream.
+const MF_DEVICESTREAM_STREAM_CATEGORY_ATTR: GUID = GUID {
+    data1: 0x149C20AC, data2: 0x2B6C, data3: 0x4C2B,
+    data4: [0x8B, 0x37, 0x3E, 0x47, 0xB8, 0x8D, 0xA3, 0x8B],
+};
+
+// PINNAME_VIDEO_CAPTURE  {FB6C4281-0353-11D1-905F-0000C0CC16BA}
+const PINNAME_VIDEO_CAPTURE: GUID = GUID {
+    data1: 0xFB6C4281, data2: 0x0353, data3: 0x11D1,
+    data4: [0x90, 0x5F, 0x00, 0x00, 0xC0, 0xCC, 0x16, 0xBA],
+};
+
 // ── Shared state between writer thread and COM stream ─────────────────────────
 
 struct SharedInner {
@@ -321,7 +347,7 @@ impl IMFMediaStream_Impl for AndroidCamStream_Impl {
 
 // ── AndroidCamSource (IMFMediaSource) ─────────────────────────────────────────
 
-#[implement(IMFMediaSource, IMFMediaEventGenerator)]
+#[implement(IMFMediaSourceEx, IMFMediaEventGenerator)]
 struct AndroidCamSource {
     shared:            Arc<StreamShared>,
     presentation_desc: IMFPresentationDescriptor,
@@ -348,6 +374,16 @@ impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
         unsafe {
             let ev = MFCreateMediaEvent(met, guidextendedtype, hrstatus, pv)?;
             self.event_queue.QueueEvent(&ev)
+        }
+    }
+}
+
+impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
+    fn GetStreamAttributes(&self, dwstreamindex: u32) -> Result<IMFAttributes> {
+        if dwstreamindex == 0 {
+            self.stream_desc.cast()
+        } else {
+            Err(E_INVALIDARG.into())
         }
     }
 }
@@ -421,7 +457,7 @@ pub struct VirtualCamWriter {
     /// Held for Drop — calls Remove() + Release() via VirtualCamHandle::drop().
     _camera: VirtualCamHandle,
     /// Keep the COM source alive for the lifetime of the virtual camera.
-    _source: IMFMediaSource,
+    _source: IMFMediaSourceEx,
     shared:  Arc<StreamShared>,
 }
 
@@ -449,6 +485,11 @@ impl VirtualCamWriter {
         let mts: [Option<IMFMediaType>; 1] = [Some(mt)];
         let stream_desc: IMFStreamDescriptor = MFCreateStreamDescriptor(0, &mts)?;
 
+        // Required by IMFVirtualCamera::AddMediaSource — the frame server reads
+        // these via IMFMediaSourceEx::GetStreamAttributes(stream_index).
+        stream_desc.SetUINT32(&MF_DEVICESTREAM_STREAM_ID_ATTR, 0)?;
+        stream_desc.SetGUID(&MF_DEVICESTREAM_STREAM_CATEGORY_ATTR, &PINNAME_VIDEO_CAPTURE)?;
+
         let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()?;
         handler.SetCurrentMediaType(&build_nv12_media_type(width, height)?)?;
 
@@ -465,13 +506,14 @@ impl VirtualCamWriter {
             event_queue: source_eq,
             stream: Mutex::new(None),
         };
-        let source: IMFMediaSource = source_obj.into();
+        let source: IMFMediaSourceEx = source_obj.into();
 
         // Load MFCreateVirtualCamera from the correct DLL (Mf.dll, not mfsensorgroup.dll).
         info!("[vcam] Loading MFCreateVirtualCamera from mfsensorgroup.dll...");
         let create_fn = load_mf_create_virtual_camera()?;
 
-        let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
+        let name:      Vec<u16> = "AndroidCam\0".encode_utf16().collect();
+        let source_id: Vec<u16> = ANDROID_CAM_SOURCE_ID.encode_utf16().collect();
         let mut cam_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
         info!("[vcam] Calling MFCreateVirtualCamera...");
@@ -480,8 +522,8 @@ impl VirtualCamWriter {
             0, // MFVirtualCameraLifetime_Session
             0, // MFVirtualCameraAccess_CurrentUser
             name.as_ptr(),
-            std::ptr::null(),  // sourceId — auto-generate
-            std::ptr::null(),  // categories
+            source_id.as_ptr(), // sourceId — required, must not be null
+            std::ptr::null(),   // categories — null → default (VIDEO_CAMERA, VIDEO, CAPTURE)
             0,
             &mut cam_ptr,
         );
