@@ -3,6 +3,8 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::thread;
 
+use log::warn;
+
 use crate::config::Config;
 use crate::virtual_cam::VirtualCamWriter;
 
@@ -134,7 +136,7 @@ fn spawn_frame_reader(
         // Open the virtual camera once and reuse across frames.
         let mut vcam = VirtualCamWriter::new(out_w, out_h);
         if vcam.is_none() {
-            eprintln!("[ffmpeg] VirtualCamera unavailable — preview only");
+            warn!("[ffmpeg] VirtualCamera unavailable — preview only");
         }
 
         // Preview throttle: send a GUI frame every `preview_every` output frames.
@@ -152,7 +154,7 @@ fn spawn_frame_reader(
             // Write the full-resolution frame to the virtual camera.
             if let Some(ref mut writer) = vcam {
                 if !writer.write_frame(&nv12) {
-                    eprintln!("[ffmpeg] VirtualCamera write error — retrying open");
+                    warn!("[ffmpeg] VirtualCamera write error — retrying open");
                     vcam = VirtualCamWriter::new(out_w, out_h);
                 }
             }
