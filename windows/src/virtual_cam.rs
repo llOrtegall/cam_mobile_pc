@@ -418,7 +418,8 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
 // ── VirtualCamWriter (public API) ─────────────────────────────────────────────
 
 pub struct VirtualCamWriter {
-    camera:  VirtualCamHandle,
+    /// Held for Drop — calls Remove() + Release() via VirtualCamHandle::drop().
+    _camera: VirtualCamHandle,
     /// Keep the COM source alive for the lifetime of the virtual camera.
     _source: IMFMediaSource,
     shared:  Arc<StreamShared>,
@@ -502,7 +503,7 @@ impl VirtualCamWriter {
             .ok().map_err(|e| { error!("[vcam] Start failed: {e}"); e })?;
 
         info!("[vcam] IMFVirtualCamera ready ({}×{} NV12 @{}fps)", width, height, OUTPUT_FPS_N);
-        Ok(Self { camera, _source: source, shared })
+        Ok(Self { _camera: camera, _source: source, shared })
     }
 
     /// Write one NV12 frame. Returns false if the virtual camera is gone.
