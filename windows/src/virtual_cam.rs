@@ -168,6 +168,27 @@ const PINNAME_VIDEO_CAPTURE: GUID = GUID {
     data4: [0x90, 0x5F, 0x00, 0x00, 0xC0, 0xCC, 0x16, 0xBA],
 };
 
+// MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES  {17145FD1-1B2B-423C-8001-2B6833ED3588}
+// Required by Frame Server — indicates color/IR/depth stream type.
+const MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR: GUID = GUID {
+    data1: 0x17145FD1, data2: 0x1B2B, data3: 0x423C,
+    data4: [0x80, 0x01, 0x2B, 0x68, 0x33, 0xED, 0x35, 0x88],
+};
+const MF_FRAMESOURCE_TYPES_COLOR: u32 = 0x0001;
+
+// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE  {C60AC5FE-252A-478F-A0EF-BC8FA401F3CF}
+// Required on source-level attributes — must equal VIDCAP_GUID.
+const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE: GUID = GUID {
+    data1: 0xC60AC5FE, data2: 0x252A, data3: 0x478F,
+    data4: [0xA0, 0xEF, 0xBC, 0x8F, 0xA4, 0x01, 0xF3, 0xCF],
+};
+
+// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID  {8AC3587A-4AE7-42D8-99E0-0A6013EEF90F}
+const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID: GUID = GUID {
+    data1: 0x8AC3587A, data2: 0x4AE7, data3: 0x42D8,
+    data4: [0x99, 0xE0, 0x0A, 0x60, 0x13, 0xEE, 0xF9, 0x0F],
+};
+
 // ── Shared state between writer thread and COM stream ─────────────────────────
 
 struct SharedInner {
@@ -388,9 +409,15 @@ impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
     }
 
     fn GetSourceAttributes(&self) -> Result<IMFAttributes> {
-        // No source-level attributes needed; return a fresh empty store.
         let mut attrs: Option<IMFAttributes> = None;
-        unsafe { MFCreateAttributes(&mut attrs, 0)?; }
+        unsafe {
+            MFCreateAttributes(&mut attrs, 1)?;
+            let a = attrs.as_ref().ok_or(windows::core::Error::from(E_FAIL))?;
+            a.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )?;
+        }
         attrs.ok_or_else(|| windows::core::Error::from(E_FAIL))
     }
 
@@ -501,6 +528,7 @@ impl VirtualCamWriter {
         // these via IMFMediaSourceEx::GetStreamAttributes(stream_index).
         stream_desc.SetUINT32(&MF_DEVICESTREAM_STREAM_ID_ATTR, 0)?;
         stream_desc.SetGUID(&MF_DEVICESTREAM_STREAM_CATEGORY_ATTR, &PINNAME_VIDEO_CAPTURE)?;
+        stream_desc.SetUINT32(&MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR, MF_FRAMESOURCE_TYPES_COLOR)?;
 
         let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()?;
         handler.SetCurrentMediaType(&build_nv12_media_type(width, height)?)?;
