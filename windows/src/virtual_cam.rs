@@ -401,6 +401,7 @@ impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
 
 impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
     fn GetStreamAttributes(&self, dwstreamindex: u32) -> Result<IMFAttributes> {
+        info!("[vcam] GetStreamAttributes(index={dwstreamindex}) called");
         if dwstreamindex == 0 {
             self.stream_desc.cast()
         } else {
@@ -409,6 +410,7 @@ impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
     }
 
     fn GetSourceAttributes(&self) -> Result<IMFAttributes> {
+        info!("[vcam] GetSourceAttributes() called");
         let mut attrs: Option<IMFAttributes> = None;
         unsafe {
             MFCreateAttributes(&mut attrs, 1)?;
@@ -422,17 +424,19 @@ impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
     }
 
     fn SetD3DManager(&self, _pmanager: Option<&IUnknown>) -> Result<()> {
-        // D3D acceleration not used — reject silently.
+        info!("[vcam] SetD3DManager() called");
         Err(windows::core::Error::from(E_NOTIMPL))
     }
 }
 
 impl IMFMediaSource_Impl for AndroidCamSource_Impl {
     fn GetCharacteristics(&self) -> Result<u32> {
+        info!("[vcam] GetCharacteristics() called");
         Ok(MFMEDIASOURCE_IS_LIVE.0 as u32)
     }
 
     fn CreatePresentationDescriptor(&self) -> Result<IMFPresentationDescriptor> {
+        info!("[vcam] CreatePresentationDescriptor() called");
         Ok(self.presentation_desc.clone())
     }
 
@@ -442,6 +446,7 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
         _pguidtimeformat:   *const GUID,
         _pvarstartposition: *const PROPVARIANT,
     ) -> Result<()> {
+        info!("[vcam] Source::Start() called");
         let source_intf: IMFMediaSource = unsafe { self.cast()? };
         let stream_obj = AndroidCamStream {
             shared:      Arc::clone(&self.shared),
