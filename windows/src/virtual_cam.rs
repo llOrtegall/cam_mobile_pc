@@ -386,6 +386,18 @@ impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
             Err(E_INVALIDARG.into())
         }
     }
+
+    fn GetSourceAttributes(&self) -> Result<IMFAttributes> {
+        // No source-level attributes needed; return a fresh empty store.
+        let mut attrs: Option<IMFAttributes> = None;
+        unsafe { MFCreateAttributes(&mut attrs, 0)?; }
+        attrs.ok_or_else(|| windows::core::Error::from(E_FAIL))
+    }
+
+    fn SetD3DManager(&self, _pmanager: Option<&IUnknown>) -> Result<()> {
+        // D3D acceleration not used — reject silently.
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
 }
 
 impl IMFMediaSource_Impl for AndroidCamSource_Impl {
