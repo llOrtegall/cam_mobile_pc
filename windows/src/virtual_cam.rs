@@ -276,7 +276,11 @@ unsafe fn build_nv12_media_type(width: u32, height: u32) -> Result<IMFMediaType>
     mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
     mt.SetGUID(&MF_MT_SUBTYPE,    &MFVideoFormat_NV12)?;
     mt.SetUINT64(&MF_MT_FRAME_SIZE,        ((width as u64) << 32) | (height as u64))?;
-    mt.SetUINT64(&MF_MT_FRAME_RATE,        ((OUTPUT_FPS_N as u64) << 32) | (OUTPUT_FPS_D as u64))?;
+    mt.SetUINT64(&MF_MT_FRAME_RATE,         ((OUTPUT_FPS_N as u64) << 32) | (OUTPUT_FPS_D as u64))?;
+    // Frame Server requires explicit min/max frame rate range on the media type
+    // during AddMediaSource validation; without them it returns MF_E_ATTRIBUTENOTFOUND.
+    mt.SetUINT64(&MF_MT_FRAME_RATE_RANGE_MAX, ((OUTPUT_FPS_N as u64) << 32) | (OUTPUT_FPS_D as u64))?;
+    mt.SetUINT64(&MF_MT_FRAME_RATE_RANGE_MIN, ((OUTPUT_FPS_N as u64) << 32) | (OUTPUT_FPS_D as u64))?;
     mt.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1u64)?;
     mt.SetUINT32(&MF_MT_INTERLACE_MODE,    MFVideoInterlace_Progressive.0 as u32)?;
     mt.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
