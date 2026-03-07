@@ -70,7 +70,12 @@ impl VirtualCamWriter {
         info!("[vcam] MFStartup...");
         MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)?;
 
-        let shared = StreamShared::new(width, height);
+        // Pre-create the stream event queue here, on this thread, while no MF
+        // callback is in progress.  Creating it inside Source::Start() would
+        // re-enter mfplat while IMFVirtualCamera::Start() already holds an
+        // internal lock, causing an access violation inside mfplat.dll.
+        let stream_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
+        let shared = StreamShared::new(width, height, stream_eq);
 
         let mt = build_nv12_media_type(width, height)?;
         let mts: [Option<IMFMediaType>; 1] = [Some(mt)];

@@ -110,10 +110,10 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
         };
         let stream: IMFMediaStream = stream_obj.into();
 
-        let stream_eq: IMFMediaEventQueue = unsafe { MFCreateEventQueue()? };
+        // The stream event queue was pre-created in VirtualCamWriter::try_new
+        // (before any MF callback) to avoid a re-entrant call into mfplat.
         {
             let mut inner = self.shared.inner.lock().unwrap();
-            inner.event_queue = Some(stream_eq);
             inner.stream_started = true;
         }
         *self.stream.lock().unwrap() = Some(stream.clone());

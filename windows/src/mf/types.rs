@@ -24,12 +24,17 @@ pub(super) struct StreamShared {
 }
 
 impl StreamShared {
-    pub(super) fn new(width: u32, height: u32) -> Arc<Self> {
+    /// Creates a `StreamShared` with the stream event queue already populated.
+    ///
+    /// The queue must be created *outside* any MF callback (e.g. right after
+    /// `MFStartup`) to avoid re-entering mfplat while it holds an internal lock,
+    /// which causes an access violation inside mfplat.dll.
+    pub(super) fn new(width: u32, height: u32, stream_event_queue: IMFMediaEventQueue) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(SharedInner {
                 latest_frame: None,
                 pending_tokens: VecDeque::new(),
-                event_queue: None,
+                event_queue: Some(stream_event_queue),
                 stream_started: false,
                 sample_time: 0,
             }),
