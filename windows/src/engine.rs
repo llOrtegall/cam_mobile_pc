@@ -104,11 +104,41 @@ const LOOP_TICK: Duration = Duration::from_millis(200);
 const RESPAWN_DELAY: Duration = Duration::from_millis(500);
 const SPAWN_FAIL_DELAY: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, PartialEq)]
+enum StreamEndpoint {
+    Unavailable,
+    UsbForwarded,
+    WifiResolved(String),
+}
+
 struct StreamState {
     ffmpeg_proc: Option<Child>,
-    device_ready: bool,
-    wifi_target_ip: Option<String>,
+    // Connection target for FFmpeg input.
+    // Keeps state transitions explicit and avoids invalid bool/Option combos.
+    endpoint: StreamEndpoint,
     last_check: Instant,
+}
+
+impl StreamState {
+    fn reset_endpoint(&mut self) {
+        self.endpoint = StreamEndpoint::Unavailable;
+    }
+
+    fn has_ready_endpoint(&self) -> bool {
+        !matches!(self.endpoint, StreamEndpoint::Unavailable)
+    }
+
+    fn ffmpeg_target(&self, cfg: &Config) -> Option<(String, u16)> {
+        match (&cfg.connection_mode, &self.endpoint) {
+            (ConnectionMode::Usb, StreamEndpoint::UsbForwarded) => {
+                Some(("localhost".to_string(), cfg.adb_port))
+            }
+            (ConnectionMode::Wifi, StreamEndpoint::WifiResolved(ip)) => {
+                Some((ip.clone(), cfg.adb_port))
+            }
+            _ => None,
+        }
+    }
 }
 
 fn force_immediate_check(last_check: &mut Instant) {
@@ -142,12 +172,11 @@ fn on_stop(
     *active = false;
     clear_ffmpeg(&mut stream.ffmpeg_proc, ffmpeg_pid);
 
-    if stream.device_ready && config.connection_mode == ConnectionMode::Usb {
+    if matches!(stream.endpoint, StreamEndpoint::UsbForwarded) {
         adb::remove_forward(config.adb_port);
     }
 
-    stream.device_ready = false;
-    stream.wifi_target_ip = None;
+    stream.reset_endpoint();
     set_status(state, Status::Idle);
     set_discovered_ip(state, None);
 }
@@ -173,8 +202,7 @@ fn on_update_config(
         if mode_changed || config.connection_mode == ConnectionMode::Usb {
             adb::remove_forward(old_port);
         }
-        stream.device_ready = false;
-        stream.wifi_target_ip = None;
+        stream.reset_endpoint();
         force_immediate_check(&mut stream.last_check);
     }
 }
@@ -186,21 +214,22 @@ fn poll_usb(
     stream: &mut StreamState,
 ) {
     let connected = adb::device_connected();
+    let usb_ready = matches!(stream.endpoint, StreamEndpoint::UsbForwarded);
 
-    if connected && !stream.device_ready {
+    if connected && !usb_ready {
         info!("[engine] USB device detected, setting up ADB forward :{}", config.adb_port);
         if adb::forward(config.adb_port) {
             info!("[engine] ADB forward ok → Connecting");
-            stream.device_ready = true;
+            stream.endpoint = StreamEndpoint::UsbForwarded;
         } else {
             error!("[engine] ADB forward failed → Error");
             set_status(state, Status::Error("ADB forward falló".to_string()));
         }
-    } else if !connected && stream.device_ready {
+    } else if !connected && usb_ready {
         warn!("[engine] USB device lost → WaitingDevice");
         clear_ffmpeg(&mut stream.ffmpeg_proc, ffmpeg_pid);
         adb::remove_forward(config.adb_port);
-        stream.device_ready = false;
+        stream.reset_endpoint();
         set_status(state, Status::WaitingDevice);
     } else if !connected {
         set_status(state, Status::WaitingDevice);
@@ -215,27 +244,29 @@ fn poll_wifi(
     stream: &mut StreamState,
 ) {
     let target = resolve_wifi_ip(config, discovered);
+    let wifi_ready = matches!(stream.endpoint, StreamEndpoint::WifiResolved(_));
 
     // Publish resolved IP to GUI (`None` means no active beacon/manual target).
     set_discovered_ip(state, target.clone());
 
     match target {
-        Some(ip) if !stream.device_ready => {
+        Some(ip) if !wifi_ready => {
             info!("[engine] WiFi device ready at {ip} → Connecting");
-            stream.wifi_target_ip = Some(ip);
-            stream.device_ready = true;
+            stream.endpoint = StreamEndpoint::WifiResolved(ip);
         }
-        None if stream.device_ready => {
+        Some(ip) => {
+            // Keep endpoint up to date if auto-discovered IP changes.
+            stream.endpoint = StreamEndpoint::WifiResolved(ip);
+        }
+        None if wifi_ready => {
             warn!("[engine] WiFi beacon lost → WaitingDevice");
             clear_ffmpeg(&mut stream.ffmpeg_proc, ffmpeg_pid);
-            stream.wifi_target_ip = None;
-            stream.device_ready = false;
+            stream.reset_endpoint();
             set_status(state, Status::WaitingDevice);
         }
         None => {
             set_status(state, Status::WaitingDevice);
         }
-        _ => {}
     }
 }
 
@@ -265,9 +296,10 @@ fn try_spawn_ffmpeg(
 
     set_status(state, Status::Connecting);
 
-    let (host, port) = match config.connection_mode {
-        ConnectionMode::Usb => ("localhost".to_string(), config.adb_port),
-        ConnectionMode::Wifi => (stream.wifi_target_ip.clone().unwrap_or_default(), config.adb_port),
+    let Some((host, port)) = stream.ffmpeg_target(config) else {
+        warn!("[engine] FFmpeg target unavailable for current endpoint/mode");
+        set_status(state, Status::WaitingDevice);
+        return;
     };
 
     info!("[engine] Spawning FFmpeg → tcp://{}:{}", host, port);
@@ -299,8 +331,7 @@ fn run(
     let mut active = false;
     let mut stream = StreamState {
         ffmpeg_proc: None,
-        device_ready: false,
-        wifi_target_ip: None,
+        endpoint: StreamEndpoint::Unavailable,
         last_check: Instant::now() - FORCE_CHECK_WINDOW,
     };
 
@@ -345,7 +376,7 @@ fn run(
                 }
             }
 
-            if stream.device_ready {
+            if stream.has_ready_endpoint() {
                 try_spawn_ffmpeg(
                     &state,
                     &preview_tx,
