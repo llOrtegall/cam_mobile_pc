@@ -8,8 +8,10 @@ use super::{OUTPUT_H, OUTPUT_W};
 pub(super) fn build_vf_filter(cfg: &Config) -> String {
     let mut steps: Vec<String> = Vec::new();
 
-    // Normalize deprecated yuvj420p to explicit full-range metadata.
+    // Normalize deprecated yuvj420p: set full-range metadata then re-tag
+    // the pixel format so swscaler never sees the deprecated yuvj420p tag.
     steps.push("setrange=full".to_string());
+    steps.push("format=yuv420p".to_string());
 
     match cfg.rotation {
         90 => steps.push("transpose=1".to_string()),
