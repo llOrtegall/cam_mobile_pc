@@ -23,6 +23,12 @@ pub const OUTPUT_H: u32 = 720;
 pub fn build_vf_filter(cfg: &Config) -> String {
     let mut steps: Vec<String> = Vec::new();
 
+    // 0. Normalise the deprecated yuvj420p pixel format (JPEG full-range)
+    //    to yuv420p + explicit full-range metadata so swscaler never sees
+    //    the deprecated "j" variant and the range conversion in step 3 is
+    //    applied correctly.
+    steps.push("setrange=full".to_string());
+
     // 1. Rotation (transpose avoids quality loss vs. rotate filter)
     match cfg.rotation {
         90 => steps.push("transpose=1".to_string()),  // 90° CW
