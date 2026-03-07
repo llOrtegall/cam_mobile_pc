@@ -67,9 +67,10 @@ impl VirtualCamWriter {
     }
 
     unsafe fn try_new(width: u32, height: u32) -> Result<Self> {
-        info!("[vcam] MFStartup...");
+        info!("[vcam] step 1: MFStartup");
         MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)?;
 
+        info!("[vcam] step 2: MFCreateEventQueue (stream)");
         // Pre-create the stream event queue here, on this thread, while no MF
         // callback is in progress.  Creating it inside Source::Start() would
         // re-enter mfplat while IMFVirtualCamera::Start() already holds an
@@ -77,22 +78,29 @@ impl VirtualCamWriter {
         let stream_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
         let shared = StreamShared::new(width, height, stream_eq);
 
+        info!("[vcam] step 3: build_nv12_media_type");
         let mt = build_nv12_media_type(width, height)?;
         let mts: [Option<IMFMediaType>; 1] = [Some(mt)];
+
+        info!("[vcam] step 4: MFCreateStreamDescriptor");
         let stream_desc: IMFStreamDescriptor = MFCreateStreamDescriptor(0, &mts)?;
 
+        info!("[vcam] step 5: set stream attributes");
         stream_desc.SetUINT32(&MF_DEVICESTREAM_STREAM_ID_ATTR, 0)?;
         stream_desc.SetGUID(&MF_DEVICESTREAM_STREAM_CATEGORY_ATTR, &PINNAME_VIDEO_CAPTURE)?;
         stream_desc.SetUINT32(&MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR, MF_FRAMESOURCE_TYPES_COLOR)?;
 
+        info!("[vcam] step 6: SetCurrentMediaType");
         let handler: IMFMediaTypeHandler = stream_desc.GetMediaTypeHandler()?;
         handler.SetCurrentMediaType(&build_nv12_media_type(width, height)?)?;
 
+        info!("[vcam] step 7: MFCreatePresentationDescriptor");
         let sds: [Option<IMFStreamDescriptor>; 1] = [Some(stream_desc.clone())];
         let presentation_desc: IMFPresentationDescriptor =
             MFCreatePresentationDescriptor(Some(&sds[..]))?;
         presentation_desc.SelectStream(0)?;
 
+        info!("[vcam] step 8: build AndroidCamSource");
         let source_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
         let source_obj = AndroidCamSource {
             shared: Arc::clone(&shared),
@@ -103,8 +111,10 @@ impl VirtualCamWriter {
         };
         let source: IMFMediaSourceEx = source_obj.into();
 
+        info!("[vcam] step 9: load MFCreateVirtualCamera");
         let create_fn = load_mf_create_virtual_camera()?;
 
+        info!("[vcam] step 10: call MFCreateVirtualCamera");
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
         let source_id: Vec<u16> = ANDROID_CAM_SOURCE_ID.encode_utf16().collect();
         let mut cam_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -120,6 +130,7 @@ impl VirtualCamWriter {
             &mut cam_ptr,
         );
 
+        info!("[vcam] step 10 result: hr={:#010x}", hr.0 as u32);
         if hr == HRESULT(0x80070057u32 as i32) {
             error!("[vcam] MFCreateVirtualCamera failed: E_INVALIDARG (0x80070057)");
             error!("[vcam] HINT: Enable Developer Mode in Windows Settings");
@@ -127,9 +138,16 @@ impl VirtualCamWriter {
         }
         hr.ok()?;
 
-        let camera = VirtualCamHandle(cam_ptr);
-        camera.add_media_source(source.as_raw() as *mut _).ok()?;
-        camera.start().ok()?;
+        info!("[vcam] step 11: add_media_source");
+        let camera = VirtualCamHandle::new(cam_ptr);
+        let hr_ams = camera.add_media_source(source.as_raw() as *mut _);
+        info!("[vcam] step 11 result: hr={:#010x}", hr_ams.0 as u32);
+        hr_ams.ok()?;
+
+        info!("[vcam] step 12: camera.start()");
+        let hr_start = camera.start();
+        info!("[vcam] step 12 result: hr={:#010x}", hr_start.0 as u32);
+        hr_start.ok()?;
 
         info!(
             "[vcam] IMFVirtualCamera ready ({}x{} NV12 @{}fps)",
