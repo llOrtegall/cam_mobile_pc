@@ -1,0 +1,58 @@
+use windows::core::GUID;
+
+pub(super) const OUTPUT_FPS_N: u32 = 30;
+pub(super) const OUTPUT_FPS_D: u32 = 1;
+pub(super) const HNS_PER_SEC: i64 = 10_000_000;
+
+// Stable source id so the same virtual camera is re-opened across calls.
+pub(super) const ANDROID_CAM_SOURCE_ID: &str = "{5B9A4C2D-8E1F-4A3B-9C7D-0F2E1A5B6C4D}\0";
+
+// MF_DEVICESTREAM_STREAM_ID {11CA3D03-4A3B-4CF3-8938-8A8E0F0F0A56}
+pub(super) const MF_DEVICESTREAM_STREAM_ID_ATTR: GUID = GUID {
+    data1: 0x11CA3D03,
+    data2: 0x4A3B,
+    data3: 0x4CF3,
+    data4: [0x89, 0x38, 0x8A, 0x8E, 0x0F, 0x0F, 0x0A, 0x56],
+};
+
+// MF_DEVICESTREAM_STREAM_CATEGORY {149C20AC-2B6C-4C2B-8B37-3E47B88DA38B}
+pub(super) const MF_DEVICESTREAM_STREAM_CATEGORY_ATTR: GUID = GUID {
+    data1: 0x149C20AC,
+    data2: 0x2B6C,
+    data3: 0x4C2B,
+    data4: [0x8B, 0x37, 0x3E, 0x47, 0xB8, 0x8D, 0xA3, 0x8B],
+};
+
+// PINNAME_VIDEO_CAPTURE {FB6C4281-0353-11D1-905F-0000C0CC16BA}
+pub(super) const PINNAME_VIDEO_CAPTURE: GUID = GUID {
+    data1: 0xFB6C4281,
+    data2: 0x0353,
+    data3: 0x11D1,
+    data4: [0x90, 0x5F, 0x00, 0x00, 0xC0, 0xCC, 0x16, 0xBA],
+};
+
+// MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES {17145FD1-1B2B-423C-8001-2B6833ED3588}
+pub(super) const MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR: GUID = GUID {
+    data1: 0x17145FD1,
+    data2: 0x1B2B,
+    data3: 0x423C,
+    data4: [0x80, 0x01, 0x2B, 0x68, 0x33, 0xED, 0x35, 0x88],
+};
+
+pub(super) const MF_FRAMESOURCE_TYPES_COLOR: u32 = 0x0001;
+
+// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE {C60AC5FE-252A-478F-A0EF-BC8FA401F3CF}
+pub(super) const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE: GUID = GUID {
+    data1: 0xC60AC5FE,
+    data2: 0x252A,
+    data3: 0x478F,
+    data4: [0xA0, 0xEF, 0xBC, 0x8F, 0xA4, 0x01, 0xF3, 0xCF],
+};
+
+// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID {8AC3587A-4AE7-42D8-99E0-0A6013EEF90F}
+pub(super) const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID: GUID = GUID {
+    data1: 0x8AC3587A,
+    data2: 0x4AE7,
+    data3: 0x42D8,
+    data4: [0x99, 0xE0, 0x0A, 0x60, 0x13, 0xEE, 0xF9, 0x0F],
+};
