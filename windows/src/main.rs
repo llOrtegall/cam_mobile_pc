@@ -3,6 +3,7 @@ mod config;
 mod discovery;
 mod engine;
 mod ffmpeg;
+mod pixel_fmt;
 mod virtual_cam;
 
 use std::sync::mpsc::{self, Receiver, Sender};
