@@ -5,7 +5,15 @@ pub(super) const OUTPUT_FPS_D: u32 = 1;
 pub(super) const HNS_PER_SEC: i64 = 10_000_000;
 
 // Stable source id so the same virtual camera is re-opened across calls.
+// Also used as the COM CLSID for CoRegisterClassObject on the new interface.
 pub(super) const ANDROID_CAM_SOURCE_ID: &str = "{5B9A4C2D-8E1F-4A3B-9C7D-0F2E1A5B6C4D}\0";
+
+pub(super) const ANDROID_CAM_SOURCE_CLSID: GUID = GUID {
+    data1: 0x5B9A4C2D,
+    data2: 0x8E1F,
+    data3: 0x4A3B,
+    data4: [0x9C, 0x7D, 0x0F, 0x2E, 0x1A, 0x5B, 0x6C, 0x4D],
+};
 
 // MF_DEVICESTREAM_STREAM_ID {11CA3D03-4A3B-4CF3-8938-8A8E0F0F0A56}
 pub(super) const MF_DEVICESTREAM_STREAM_ID_ATTR: GUID = GUID {
