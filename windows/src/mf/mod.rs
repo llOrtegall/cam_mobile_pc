@@ -25,6 +25,7 @@ use windows::Win32::Media::MediaFoundation::*;
 
 use self::camera::{load_mf_create_virtual_camera, VirtualCamHandle};
 use self::constants::{
+    KSCATEGORY_VIDEO_CAMERA,
     ANDROID_CAM_SOURCE_CLSID,
     ANDROID_CAM_FRIENDLY_NAME,
     ANDROID_CAM_SOURCE_ID,
@@ -140,6 +141,7 @@ impl VirtualCamWriter {
         info!("[vcam] step 10: call MFCreateVirtualCamera");
         let name: Vec<u16> = "AndroidCam\0".encode_utf16().collect();
         let source_id: Vec<u16> = ANDROID_CAM_SOURCE_ID.encode_utf16().collect();
+        let categories = [KSCATEGORY_VIDEO_CAMERA];
         let mut cam_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
         let hr = create_fn(
@@ -148,8 +150,8 @@ impl VirtualCamWriter {
             0,
             name.as_ptr(),
             source_id.as_ptr(),
-            std::ptr::null(),
-            0,
+            categories.as_ptr(),
+            categories.len() as u32,
             &mut cam_ptr,
         );
 
@@ -209,31 +211,21 @@ impl VirtualCamWriter {
         info!("[vcam] step 11d AddProperty(Access) hr={:#010x}", hr_access.0 as u32);
         hr_access.ok()?;
 
-        let (factory_opt, reg_cookie) = if camera.supports_add_media_source() {
-            // Classic interface: pass source directly.
-            let hr_ams = camera.add_media_source(source.as_raw() as *mut _);
-            info!("[vcam] step 11 (classic AddMediaSource) result: hr={:#010x}", hr_ams.0 as u32);
-            hr_ams.ok()?;
-            (None, 0u32)
-        } else {
-            // New interface: Start() will call CoCreateInstance(sourceId CLSID).
-            // Register our IClassFactory so the running process is found without
-            // a registry entry or launching a new EXE.
-            let factory_obj = factory::AndroidCamSourceFactory {
-                shared: Arc::clone(&shared),
-                presentation_desc,
-                stream_desc,
-            };
-            let factory_com: IClassFactory = factory_obj.into();
-            let cookie = CoRegisterClassObject(
-                &ANDROID_CAM_SOURCE_CLSID,
-                &factory_com,
-                CLSCTX_LOCAL_SERVER,
-                REGCLS_MULTIPLEUSE,
-            )?;
-            info!("[vcam] step 11 (CoRegisterClassObject) cookie={}", cookie);
-            (Some(factory_com), cookie)
+        // Always register the class factory via CoRegisterClassObject so
+        // that Frame Server can CoCreateInstance the source CLSID during Start().
+        let factory_obj = factory::AndroidCamSourceFactory {
+            shared: Arc::clone(&shared),
+            presentation_desc,
+            stream_desc,
         };
+        let factory_com: IClassFactory = factory_obj.into();
+        let reg_cookie = CoRegisterClassObject(
+            &ANDROID_CAM_SOURCE_CLSID,
+            &factory_com,
+            CLSCTX_LOCAL_SERVER,
+            REGCLS_MULTIPLEUSE,
+        )?;
+        info!("[vcam] step 11 (CoRegisterClassObject) cookie={}", reg_cookie);
 
         info!("[vcam] step 12: camera.start()");
         let hr_start = camera.start();
@@ -250,7 +242,7 @@ impl VirtualCamWriter {
         Ok(Self {
             _camera: camera,
             _source: source,
-            _factory: factory_opt,
+            _factory: Some(factory_com),
             reg_cookie,
             shared,
         })

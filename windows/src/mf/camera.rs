@@ -106,31 +106,25 @@ impl VirtualCamHandle {
         *(self.classic as *const *const *const ())
     }
 
-    /// Returns true if the classic (IUnknown-based) interface was obtained via QI.
-    /// False means the primary pointer uses the new IMFAttributes-based vtable layout.
-    pub(super) fn supports_add_media_source(&self) -> bool {
-        self.use_classic_offsets
-    }
-
     pub(super) unsafe fn add_media_source(
         &self,
         source_unk: *mut std::ffi::c_void,
     ) -> HRESULT {
-        // Only valid on classic (IUnknown-based) vtable: slot 7.
-        // The new (IMFAttributes-based) interface does NOT have AddMediaSource.
-        debug_assert!(self.use_classic_offsets, "add_media_source called on new interface");
+        // Classic (IUnknown-based) vtable: slot 7
+        // New (IMFAttributes-based) vtable: slot 37 (same method, offset +30)
+        let slot = if self.use_classic_offsets { 7 } else { 37 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
-        ) -> HRESULT = std::mem::transmute(*self.vtable().add(7));
+        ) -> HRESULT = std::mem::transmute(*self.vtable().add(slot));
         f(self.classic, source_unk, std::ptr::null_mut())
     }
 
     pub(super) unsafe fn start(&self) -> HRESULT {
         // Classic (IUnknown-based) vtable: slot 8   Start(IMFAttributes*)
-        // New (IMFAttributes-based) vtable: slot 36  Start(IMFAsyncCallback*)
-        let slot = if self.use_classic_offsets { 8 } else { 36 };
+        // New (IMFAttributes-based) vtable: slot 38  Start(IMFAsyncCallback*)
+        let slot = if self.use_classic_offsets { 8 } else { 38 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
@@ -157,8 +151,8 @@ impl VirtualCamHandle {
     }
 
     unsafe fn remove(&self) -> HRESULT {
-        // Classic: slot 10  |  New: slot 38
-        let slot = if self.use_classic_offsets { 10 } else { 38 };
+        // Classic: slot 10  |  New: slot 40
+        let slot = if self.use_classic_offsets { 10 } else { 40 };
         let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> HRESULT =
             std::mem::transmute(*self.vtable().add(slot));
         f(self.classic)

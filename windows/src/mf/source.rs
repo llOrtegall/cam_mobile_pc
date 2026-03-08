@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 use windows::core::*;
-use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, E_POINTER, HRESULT_FROM_WIN32, S_OK, ERROR_SET_NOT_FOUND};
+use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, E_POINTER, S_OK, ERROR_SET_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::Media::KernelStreaming::*;
 use windows::Win32::Media::MediaFoundation::*;
 
@@ -17,6 +17,10 @@ use super::constants::{
 };
 use super::stream::AndroidCamStream;
 use super::types::StreamShared;
+
+fn hresult_from_win32(error: WIN32_ERROR) -> HRESULT {
+    HRESULT((((error.0 as u32) & 0x0000_FFFF) | (7 << 16) | 0x8000_0000) as i32)
+}
 
 #[implement(IMFMediaSourceEx, IMFMediaEventGenerator, IMFGetService, IKsControl, IMFSampleAllocatorControl)]
 pub(super) struct AndroidCamSource {
@@ -130,7 +134,8 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
             stream_desc: self.stream_desc.clone(),
             source: source_intf,
         };
-        let stream: IMFMediaStream = stream_obj.into();
+        let stream2: IMFMediaStream2 = stream_obj.into();
+        let stream: IMFMediaStream = stream2.cast()?;
 
         // The stream event queue was pre-created in VirtualCamWriter::try_new
         // (before any MF callback) to avoid a re-entrant call into mfplat.
@@ -202,7 +207,7 @@ impl IKsControl_Impl for AndroidCamSource_Impl {
         _datalength: u32,
         _bytesreturned: *mut u32,
     ) -> Result<()> {
-        Err(HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND.0).into())
+        Err(hresult_from_win32(ERROR_SET_NOT_FOUND).into())
     }
 
     fn KsMethod(
@@ -213,7 +218,7 @@ impl IKsControl_Impl for AndroidCamSource_Impl {
         _datalength: u32,
         _bytesreturned: *mut u32,
     ) -> Result<()> {
-        Err(HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND.0).into())
+        Err(hresult_from_win32(ERROR_SET_NOT_FOUND).into())
     }
 
     fn KsEvent(
@@ -224,7 +229,7 @@ impl IKsControl_Impl for AndroidCamSource_Impl {
         _datalength: u32,
         _bytesreturned: *mut u32,
     ) -> Result<()> {
-        Err(HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND.0).into())
+        Err(hresult_from_win32(ERROR_SET_NOT_FOUND).into())
     }
 }
 
