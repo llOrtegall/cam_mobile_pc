@@ -29,8 +29,14 @@ impl IClassFactory_Impl for AndroidCamSourceFactory_Impl {
         riid: *const GUID,
         ppv: *mut *mut core::ffi::c_void,
     ) -> Result<()> {
-        info!("[vcam] IClassFactory::CreateInstance called");
         unsafe {
+            let g = &*riid;
+            info!(
+                "[vcam] IClassFactory::CreateInstance riid={{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+                g.data1, g.data2, g.data3,
+                g.data4[0], g.data4[1],
+                g.data4[2], g.data4[3], g.data4[4], g.data4[5], g.data4[6], g.data4[7]
+            );
             let event_queue: IMFMediaEventQueue = MFCreateEventQueue()?;
             let source_obj = AndroidCamSource {
                 shared: Arc::clone(&self.shared),
@@ -41,7 +47,9 @@ impl IClassFactory_Impl for AndroidCamSourceFactory_Impl {
             };
             let source: IMFMediaSourceEx = source_obj.into();
             let unk: IUnknown = source.cast()?;
-            unk.query(riid, ppv).ok()
+            let hr = unk.query(riid, ppv);
+            info!("[vcam] CreateInstance QI result: hr={:#010x}", hr.0 as u32);
+            hr.ok()
         }
     }
 
