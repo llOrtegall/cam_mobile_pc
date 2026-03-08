@@ -4,6 +4,8 @@ use windows::core::{w, Error, GUID, HRESULT, PCSTR, Result};
 use windows::Win32::Foundation::E_NOTIMPL;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
+use super::constants::DevPropKey;
+
 // IID of the "classic" IMFVirtualCamera that has AddStreamConfig and AddMediaSource.
 // windows-rs 0.58 binds a different (newer) interface (IID 1c08a864...) that inherits from
 // IMFAttributes and has no AddMediaSource.  We need the classic one for Frame Server sources.
@@ -127,8 +129,8 @@ impl VirtualCamHandle {
 
     pub(super) unsafe fn start(&self) -> HRESULT {
         // Classic (IUnknown-based) vtable: slot 8   Start(IMFAttributes*)
-        // New (IMFAttributes-based) vtable: slot 36  Start(IMFAsyncCallback*)
-        let slot = if self.use_classic_offsets { 8 } else { 36 };
+        // New (IMFAttributes-based) vtable: slot 38  Start(IMFAsyncCallback*)
+        let slot = if self.use_classic_offsets { 8 } else { 38 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
@@ -136,9 +138,27 @@ impl VirtualCamHandle {
         f(self.classic, std::ptr::null_mut())
     }
 
+    pub(super) unsafe fn add_property(
+        &self,
+        key: &DevPropKey,
+        prop_type: u32,
+        data: *const u8,
+        size: u32,
+    ) -> HRESULT {
+        let slot = if self.use_classic_offsets { 4 } else { 34 };
+        let f: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *const DevPropKey,
+            u32,
+            *const u8,
+            u32,
+        ) -> HRESULT = std::mem::transmute(*self.vtable().add(slot));
+        f(self.classic, key, prop_type, data, size)
+    }
+
     unsafe fn remove(&self) -> HRESULT {
-        // Classic: slot 10  |  New: slot 38
-        let slot = if self.use_classic_offsets { 10 } else { 38 };
+        // Classic: slot 10  |  New: slot 40
+        let slot = if self.use_classic_offsets { 10 } else { 40 };
         let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> HRESULT =
             std::mem::transmute(*self.vtable().add(slot));
         f(self.classic)

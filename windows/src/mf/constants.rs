@@ -50,6 +50,64 @@ pub(super) const MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR: GUID = GUID {
 
 pub(super) const MF_FRAMESOURCE_TYPES_COLOR: u32 = 0x0001;
 
+// MF_DEVICESTREAM_FRAMESERVER_SHARED {1CB378E9-B279-41D4-AF97-34A243E68320}
+pub(super) const MF_DEVICESTREAM_FRAMESERVER_SHARED_ATTR: GUID = GUID {
+    data1: 0x1CB378E9,
+    data2: 0xB279,
+    data3: 0x41D4,
+    data4: [0xAF, 0x97, 0x34, 0xA2, 0x43, 0xE6, 0x83, 0x20],
+};
+
+pub(super) const DEVPROP_TYPE_INT32: u32 = 0x00000006;
+pub(super) const DEVPROP_TYPE_STRING: u32 = 0x00000012;
+
+#[repr(C)]
+pub(super) struct DevPropKey {
+    pub fmtid: GUID,
+    pub pid: u32,
+}
+
+// Custom DEVPKEYs from Microsoft's virtual camera sample.
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_SOURCEID: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 4,
+};
+
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_FRIENDLYNAME: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 5,
+};
+
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_LIFETIME: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 6,
+};
+
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_ACCESS: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 7,
+};
+
 // MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE {C60AC5FE-252A-478F-A0EF-BC8FA5F7CAD3}
 pub(super) const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE: GUID = GUID {
     data1: 0xC60AC5FE,

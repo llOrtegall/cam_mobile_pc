@@ -26,8 +26,16 @@ use windows::Win32::Media::MediaFoundation::*;
 use self::camera::{load_mf_create_virtual_camera, VirtualCamHandle};
 use self::constants::{
     ANDROID_CAM_SOURCE_CLSID,
+    ANDROID_CAM_FRIENDLY_NAME,
     ANDROID_CAM_SOURCE_ID,
+    DEVPKEY_DEVICEINTERFACE_VCAMCREATE_ACCESS,
+    DEVPKEY_DEVICEINTERFACE_VCAMCREATE_FRIENDLYNAME,
+    DEVPKEY_DEVICEINTERFACE_VCAMCREATE_LIFETIME,
+    DEVPKEY_DEVICEINTERFACE_VCAMCREATE_SOURCEID,
+    DEVPROP_TYPE_INT32,
+    DEVPROP_TYPE_STRING,
     MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR,
+    MF_DEVICESTREAM_FRAMESERVER_SHARED_ATTR,
     MF_DEVICESTREAM_STREAM_CATEGORY_ATTR,
     MF_DEVICESTREAM_STREAM_ID_ATTR,
     MF_FRAMESOURCE_TYPES_COLOR,
@@ -99,6 +107,7 @@ impl VirtualCamWriter {
         info!("[vcam] step 5: set stream attributes");
         stream_desc.SetUINT32(&MF_DEVICESTREAM_STREAM_ID_ATTR, 0)?;
         stream_desc.SetGUID(&MF_DEVICESTREAM_STREAM_CATEGORY_ATTR, &PINNAME_VIDEO_CAPTURE)?;
+        stream_desc.SetUINT32(&MF_DEVICESTREAM_FRAMESERVER_SHARED_ATTR, 1)?;
         stream_desc.SetUINT32(&MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR, MF_FRAMESOURCE_TYPES_COLOR)?;
 
         info!("[vcam] step 6: SetCurrentMediaType");
@@ -152,6 +161,52 @@ impl VirtualCamWriter {
 
         info!("[vcam] step 11: add_media_source / CoRegisterClassObject");
         let camera = VirtualCamHandle::new(cam_ptr);
+        let source_id_bytes = source_id.as_ptr() as *const u8;
+        let source_id_size = (source_id.len() * std::mem::size_of::<u16>()) as u32;
+        let friendly_name: Vec<u16> = format!("{ANDROID_CAM_FRIENDLY_NAME} Windows Virtual Camera\0")
+            .encode_utf16()
+            .collect();
+        let friendly_name_bytes = friendly_name.as_ptr() as *const u8;
+        let friendly_name_size = (friendly_name.len() * std::mem::size_of::<u16>()) as u32;
+        let lifetime: i32 = 0;
+        let access: i32 = 0;
+
+        let hr_source = camera.add_property(
+            &DEVPKEY_DEVICEINTERFACE_VCAMCREATE_SOURCEID,
+            DEVPROP_TYPE_STRING,
+            source_id_bytes,
+            source_id_size,
+        );
+        info!("[vcam] step 11a AddProperty(SourceId) hr={:#010x}", hr_source.0 as u32);
+        hr_source.ok()?;
+
+        let hr_name = camera.add_property(
+            &DEVPKEY_DEVICEINTERFACE_VCAMCREATE_FRIENDLYNAME,
+            DEVPROP_TYPE_STRING,
+            friendly_name_bytes,
+            friendly_name_size,
+        );
+        info!("[vcam] step 11b AddProperty(FriendlyName) hr={:#010x}", hr_name.0 as u32);
+        hr_name.ok()?;
+
+        let hr_lifetime = camera.add_property(
+            &DEVPKEY_DEVICEINTERFACE_VCAMCREATE_LIFETIME,
+            DEVPROP_TYPE_INT32,
+            &lifetime as *const i32 as *const u8,
+            std::mem::size_of::<i32>() as u32,
+        );
+        info!("[vcam] step 11c AddProperty(Lifetime) hr={:#010x}", hr_lifetime.0 as u32);
+        hr_lifetime.ok()?;
+
+        let hr_access = camera.add_property(
+            &DEVPKEY_DEVICEINTERFACE_VCAMCREATE_ACCESS,
+            DEVPROP_TYPE_INT32,
+            &access as *const i32 as *const u8,
+            std::mem::size_of::<i32>() as u32,
+        );
+        info!("[vcam] step 11d AddProperty(Access) hr={:#010x}", hr_access.0 as u32);
+        hr_access.ok()?;
+
         let (factory_opt, reg_cookie) = if camera.supports_add_media_source() {
             // Classic interface: pass source directly.
             let hr_ams = camera.add_media_source(source.as_raw() as *mut _);
