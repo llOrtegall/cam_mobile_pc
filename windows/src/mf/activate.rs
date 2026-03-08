@@ -103,11 +103,11 @@ impl IMFAttributes_Impl for AndroidCamActivate_Impl {
         guidkey: *const GUID,
         pwszvalue: PWSTR,
         cchbufsize: u32,
-        pcchLength: *mut u32,
+        pcch_length: *mut u32,
     ) -> Result<()> {
         unsafe {
             let slice = std::slice::from_raw_parts_mut(pwszvalue.0, cchbufsize as usize);
-            let pcchl = if pcchLength.is_null() { None } else { Some(pcchLength) };
+            let pcchl = if pcch_length.is_null() { None } else { Some(pcch_length) };
             self.attrs.GetString(guidkey, slice, pcchl)
         }
     }
@@ -116,9 +116,9 @@ impl IMFAttributes_Impl for AndroidCamActivate_Impl {
         &self,
         guidkey: *const GUID,
         ppwszvalue: *mut PWSTR,
-        pcchLength: *mut u32,
+        pcch_length: *mut u32,
     ) -> Result<()> {
-        unsafe { self.attrs.GetAllocatedString(guidkey, ppwszvalue, pcchLength) }
+        unsafe { self.attrs.GetAllocatedString(guidkey, ppwszvalue, pcch_length) }
     }
 
     fn GetBlobSize(&self, guidkey: *const GUID) -> Result<u32> {
@@ -130,11 +130,11 @@ impl IMFAttributes_Impl for AndroidCamActivate_Impl {
         guidkey: *const GUID,
         pbuf: *mut u8,
         cbbufsize: u32,
-        pcbBlobSize: *mut u32,
+        pcb_blob_size: *mut u32,
     ) -> Result<()> {
         unsafe {
             let slice = std::slice::from_raw_parts_mut(pbuf, cbbufsize as usize);
-            let pcbs = if pcbBlobSize.is_null() { None } else { Some(pcbBlobSize) };
+            let pcbs = if pcb_blob_size.is_null() { None } else { Some(pcb_blob_size) };
             self.attrs.GetBlob(guidkey, slice, pcbs)
         }
     }
