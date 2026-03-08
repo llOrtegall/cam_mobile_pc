@@ -138,11 +138,15 @@ impl VirtualCamWriter {
         }
         hr.ok()?;
 
-        info!("[vcam] step 11: add_media_source");
+        info!("[vcam] step 11: add_media_source (classic interface only)");
         let camera = VirtualCamHandle::new(cam_ptr);
-        let hr_ams = camera.add_media_source(source.as_raw() as *mut _);
-        info!("[vcam] step 11 result: hr={:#010x}", hr_ams.0 as u32);
-        hr_ams.ok()?;
+        if camera.supports_add_media_source() {
+            let hr_ams = camera.add_media_source(source.as_raw() as *mut _);
+            info!("[vcam] step 11 result: hr={:#010x}", hr_ams.0 as u32);
+            hr_ams.ok()?;
+        } else {
+            info!("[vcam] step 11: new interface — AddMediaSource absent, skipping");
+        }
 
         info!("[vcam] step 12: camera.start()");
         let hr_start = camera.start();
