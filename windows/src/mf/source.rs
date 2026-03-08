@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 use windows::core::*;
-use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, S_OK};
+use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, E_POINTER, HRESULT_FROM_WIN32, S_OK, ERROR_SET_NOT_FOUND};
+use windows::Win32::Media::KernelStreaming::*;
 use windows::Win32::Media::MediaFoundation::*;
 
 use super::constants::{
@@ -17,7 +18,7 @@ use super::constants::{
 use super::stream::AndroidCamStream;
 use super::types::StreamShared;
 
-#[implement(IMFMediaSourceEx, IMFMediaEventGenerator)]
+#[implement(IMFMediaSourceEx, IMFMediaEventGenerator, IMFGetService, IKsControl, IMFSampleAllocatorControl)]
 pub(super) struct AndroidCamSource {
     pub(super) shared: Arc<StreamShared>,
     pub(super) presentation_desc: IMFPresentationDescriptor,
@@ -162,13 +163,89 @@ impl IMFMediaSource_Impl for AndroidCamSource_Impl {
     }
 
     fn Pause(&self) -> Result<()> {
-        Ok(())
+        Err(MF_E_INVALID_STATE_TRANSITION.into())
     }
 
     fn Shutdown(&self) -> Result<()> {
         self.shared.running.store(false, Ordering::SeqCst);
         unsafe {
             self.event_queue.Shutdown()?;
+        }
+        Ok(())
+    }
+}
+
+impl IMFGetService_Impl for AndroidCamSource_Impl {
+    fn GetService(
+        &self,
+        _guidservice: *const GUID,
+        _riid: *const GUID,
+        ppvobject: *mut *mut core::ffi::c_void,
+    ) -> Result<()> {
+        if ppvobject.is_null() {
+            return Err(E_POINTER.into());
+        }
+
+        unsafe {
+            *ppvobject = std::ptr::null_mut();
+        }
+        Err(MF_E_UNSUPPORTED_SERVICE.into())
+    }
+}
+
+impl IKsControl_Impl for AndroidCamSource_Impl {
+    fn KsProperty(
+        &self,
+        _property: *const KSIDENTIFIER,
+        _propertylength: u32,
+        _propertydata: *mut core::ffi::c_void,
+        _datalength: u32,
+        _bytesreturned: *mut u32,
+    ) -> Result<()> {
+        Err(HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND.0).into())
+    }
+
+    fn KsMethod(
+        &self,
+        _method: *const KSIDENTIFIER,
+        _methodlength: u32,
+        _methoddata: *mut core::ffi::c_void,
+        _datalength: u32,
+        _bytesreturned: *mut u32,
+    ) -> Result<()> {
+        Err(HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND.0).into())
+    }
+
+    fn KsEvent(
+        &self,
+        _event: *const KSIDENTIFIER,
+        _eventlength: u32,
+        _eventdata: *mut core::ffi::c_void,
+        _datalength: u32,
+        _bytesreturned: *mut u32,
+    ) -> Result<()> {
+        Err(HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND.0).into())
+    }
+}
+
+impl IMFSampleAllocatorControl_Impl for AndroidCamSource_Impl {
+    fn SetDefaultAllocator(&self, _dwoutputstreamid: u32, _pallocator: Option<&IUnknown>) -> Result<()> {
+        Ok(())
+    }
+
+    fn GetAllocatorUsage(
+        &self,
+        dwoutputstreamid: u32,
+        pdwinputstreamid: *mut u32,
+        peusage: *mut MFSampleAllocatorUsage,
+    ) -> Result<()> {
+        if pdwinputstreamid.is_null() || peusage.is_null() {
+            return Err(E_POINTER.into());
+        }
+
+        unsafe {
+            *pdwinputstreamid = dwoutputstreamid;
+            *peusage = MFSampleAllocatorUsage_UsesCustomAllocator;
         }
         Ok(())
     }
