@@ -5,6 +5,7 @@
 
 mod camera;
 mod constants;
+mod factory;
 mod source;
 mod stream;
 mod types;
@@ -13,12 +14,17 @@ use log::{error, info};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use windows::Win32::System::Com::{
+    CoRegisterClassObject, CoRevokeClassObject, IClassFactory, CLSCTX_LOCAL_SERVER,
+    REGCLS_MULTIPLEUSE,
+};
 use windows::core::*;
 use windows::Win32::Foundation::S_OK;
 use windows::Win32::Media::MediaFoundation::*;
 
 use self::camera::{load_mf_create_virtual_camera, VirtualCamHandle};
 use self::constants::{
+    ANDROID_CAM_SOURCE_CLSID,
     ANDROID_CAM_SOURCE_ID,
     MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR,
     MF_DEVICESTREAM_STREAM_CATEGORY_ATTR,
@@ -50,6 +56,10 @@ impl Drop for ComInitGuard {
 pub struct VirtualCamWriter {
     _camera: VirtualCamHandle,
     _source: IMFMediaSourceEx,
+    /// IClassFactory kept alive so Frame Server can call CoCreateInstance at any time.
+    _factory: Option<IClassFactory>,
+    /// Cookie from CoRegisterClassObject; 0 if classic interface was used.
+    reg_cookie: u32,
     shared: Arc<StreamShared>,
 }
 
@@ -102,10 +112,11 @@ impl VirtualCamWriter {
 
         info!("[vcam] step 8: build AndroidCamSource");
         let source_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
+        // Clone descriptors so the factory can also use them (classic path moves them).
         let source_obj = AndroidCamSource {
             shared: Arc::clone(&shared),
-            presentation_desc,
-            stream_desc,
+            presentation_desc: presentation_desc.clone(),
+            stream_desc: stream_desc.clone(),
             event_queue: source_eq,
             stream: Mutex::new(None),
         };
@@ -138,15 +149,33 @@ impl VirtualCamWriter {
         }
         hr.ok()?;
 
-        info!("[vcam] step 11: add_media_source (classic interface only)");
+        info!("[vcam] step 11: add_media_source / CoRegisterClassObject");
         let camera = VirtualCamHandle::new(cam_ptr);
-        if camera.supports_add_media_source() {
+        let (factory_opt, reg_cookie) = if camera.supports_add_media_source() {
+            // Classic interface: pass source directly.
             let hr_ams = camera.add_media_source(source.as_raw() as *mut _);
-            info!("[vcam] step 11 result: hr={:#010x}", hr_ams.0 as u32);
+            info!("[vcam] step 11 (classic AddMediaSource) result: hr={:#010x}", hr_ams.0 as u32);
             hr_ams.ok()?;
+            (None, 0u32)
         } else {
-            info!("[vcam] step 11: new interface — AddMediaSource absent, skipping");
-        }
+            // New interface: Start() will call CoCreateInstance(sourceId CLSID).
+            // Register our IClassFactory so the running process is found without
+            // a registry entry or launching a new EXE.
+            let factory_obj = factory::AndroidCamSourceFactory {
+                shared: Arc::clone(&shared),
+                presentation_desc,
+                stream_desc,
+            };
+            let factory_com: IClassFactory = factory_obj.into();
+            let cookie = CoRegisterClassObject(
+                &ANDROID_CAM_SOURCE_CLSID,
+                &factory_com,
+                CLSCTX_LOCAL_SERVER,
+                REGCLS_MULTIPLEUSE,
+            )?;
+            info!("[vcam] step 11 (CoRegisterClassObject) cookie={}", cookie);
+            (Some(factory_com), cookie)
+        };
 
         info!("[vcam] step 12: camera.start()");
         let hr_start = camera.start();
@@ -163,6 +192,8 @@ impl VirtualCamWriter {
         Ok(Self {
             _camera: camera,
             _source: source,
+            _factory: factory_opt,
+            reg_cookie,
             shared,
         })
     }
@@ -210,6 +241,11 @@ impl VirtualCamWriter {
 impl Drop for VirtualCamWriter {
     fn drop(&mut self) {
         self.shared.running.store(false, Ordering::SeqCst);
+        if self.reg_cookie != 0 {
+            unsafe {
+                let _ = CoRevokeClassObject(self.reg_cookie);
+            }
+        }
         unsafe {
             let _ = MFShutdown();
         }
