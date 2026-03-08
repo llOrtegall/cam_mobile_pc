@@ -3,7 +3,9 @@ mod config;
 mod discovery;
 mod engine;
 mod ffmpeg;
-mod virtual_cam;
+mod mf;
+mod pixel_fmt;
+mod ui;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -13,6 +15,8 @@ use eframe::egui;
 use config::{Config, ConnectionMode};
 use engine::{AppState, EngineCmd, Status};
 use ffmpeg::{PREVIEW_H, PREVIEW_W};
+use ui::theme::apply_theme;
+use ui::widgets::{action_btn, selectable_btn};
 
 // ── Catppuccin Mocha palette ──────────────────────────────────────────────────
 const C_BASE: egui::Color32 = egui::Color32::from_rgb(30, 30, 46);    // #1e1e2e
@@ -54,7 +58,7 @@ struct ConfigUpdate {
 
 impl CamPCApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply_theme(&cc.egui_ctx);
+        apply_theme(&cc.egui_ctx, C_BASE, C_MANTLE, C_SURFACE0, C_TEXT);
 
         let config = Config::load();
         let state = Arc::new(Mutex::new(AppState {
@@ -188,7 +192,15 @@ impl CamPCApp {
                     for deg in [0u32, 90, 180, 270] {
                         let selected = self.config.rotation == deg;
                         if ui
-                            .add(selectable_btn(&format!("{deg}°"), selected))
+                            .add(selectable_btn(
+                                &format!("{deg}°"),
+                                selected,
+                                C_SURFACE0,
+                                C_MANTLE,
+                                C_TEXT,
+                                C_OVERLAY,
+                                C_SURFACE0,
+                            ))
                             .clicked()
                         {
                             self.config.rotation = deg;
@@ -203,7 +215,18 @@ impl CamPCApp {
                     ui.add_space(4.0);
                     for (label, mode) in [("WiFi", ConnectionMode::Wifi), ("USB", ConnectionMode::Usb)] {
                         let selected = self.config.connection_mode == mode;
-                        if ui.add(selectable_btn(label, selected)).clicked() {
+                        if ui
+                            .add(selectable_btn(
+                                label,
+                                selected,
+                                C_SURFACE0,
+                                C_MANTLE,
+                                C_TEXT,
+                                C_OVERLAY,
+                                C_SURFACE0,
+                            ))
+                            .clicked()
+                        {
                             self.config.connection_mode = mode;
                             update.stream_relevant = true;
                         }
@@ -404,55 +427,22 @@ impl eframe::App for CamPCApp {
     }
 }
 
-// ── Widget helpers ────────────────────────────────────────────────────────────
-
-/// Small pill-style button used for rotation and mode selectors.
-fn selectable_btn(label: &str, selected: bool) -> impl egui::Widget + '_ {
-    move |ui: &mut egui::Ui| {
-        let bg = if selected { C_SURFACE0 } else { C_MANTLE };
-        let fg = if selected { C_TEXT } else { C_OVERLAY };
-        let btn = egui::Button::new(egui::RichText::new(label).color(fg).size(11.0))
-            .fill(bg)
-            .stroke(egui::Stroke::new(1.0, if selected { C_TEXT } else { C_SURFACE0 }))
-            .rounding(4.0);
-        ui.add(btn)
-    }
-}
-
-/// Coloured action button (Iniciar / Detener / Salir).
-fn action_btn(
-    label: &str,
-    bg: egui::Color32,
-    fg: egui::Color32,
-) -> impl egui::Widget + '_ {
-    move |ui: &mut egui::Ui| {
-        ui.add(
-            egui::Button::new(egui::RichText::new(label).color(fg).strong().size(11.0))
-                .fill(bg)
-                .rounding(4.0),
-        )
-    }
-}
-
-// ── Theme ─────────────────────────────────────────────────────────────────────
-
-fn apply_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = C_BASE;
-    visuals.window_fill = C_BASE;
-    visuals.extreme_bg_color = C_MANTLE;
-    visuals.widgets.inactive.bg_fill = C_SURFACE0;
-    visuals.widgets.hovered.bg_fill = C_SURFACE0;
-    visuals.widgets.active.bg_fill = C_SURFACE0;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, C_TEXT);
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, C_TEXT);
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, C_TEXT);
-    ctx.set_visuals(visuals);
-}
-
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+fn init_logger() {
+    use simplelog::{LevelFilter, WriteLogger};
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let log_dir = std::path::PathBuf::from(appdata).join("campc");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("campc.log");
+    if let Ok(file) = std::fs::File::create(&log_path) {
+        let _ = WriteLogger::init(LevelFilter::Info, simplelog::Config::default(), file);
+        log::info!("CamPC started — log: {}", log_path.display());
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    init_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("CamPC")

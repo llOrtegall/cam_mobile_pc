@@ -1,3 +1,4 @@
+use log::error;
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,7 +24,7 @@ pub fn start_listener() -> Arc<Mutex<Option<DiscoveredDevice>>> {
         let socket = match UdpSocket::bind(("0.0.0.0", BEACON_PORT)) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[discovery] Cannot bind UDP :{BEACON_PORT}: {e}");
+                error!("[discovery] Cannot bind UDP :{BEACON_PORT}: {e}");
                 return;
             }
         };
