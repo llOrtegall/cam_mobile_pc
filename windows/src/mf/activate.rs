@@ -5,6 +5,14 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Media::MediaFoundation::*;
 
+use super::constants::{
+    ANDROID_CAM_FRIENDLY_NAME,
+    KSCATEGORY_VIDEO_CAMERA,
+    MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+};
 use super::source::AndroidCamSource;
 use super::types::StreamShared;
 
@@ -34,8 +42,20 @@ impl AndroidCamActivate {
         stream_desc: IMFStreamDescriptor,
     ) -> Result<Self> {
         let mut attrs: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs, 0)?;
+        MFCreateAttributes(&mut attrs, 3)?;
         let attrs = attrs.unwrap();
+        attrs.SetGUID(
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+        )?;
+        attrs.SetGUID(
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
+            &KSCATEGORY_VIDEO_CAMERA,
+        )?;
+        attrs.SetString(
+            &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+            &windows::core::HSTRING::from(ANDROID_CAM_FRIENDLY_NAME),
+        )?;
         Ok(Self {
             shared,
             presentation_desc,
