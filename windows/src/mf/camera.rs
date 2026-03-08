@@ -41,10 +41,10 @@ const IID_CLASSIC_IMF_VIRTUAL_CAMERA: GUID = GUID {
 ///
 /// New (IID 1c08a864, inherits IMFAttributes — 30 extra slots) — vtable slots:
 ///   0-2  IUnknown, 3-32 IMFAttributes (30 methods),
-///   33 AddStreamConfig, 34 AddProperty, 35 AddRegistryEntry,
-///   36 AddDeviceSourceInfo, 37 Start(IMFAsyncCallback*),
-///   38 Stop, 39 Remove, 40 GetMediaSource
-///   (AddMediaSource does NOT exist in the new interface)
+///   33 AddDeviceSourceInfo, 34 AddProperty, 35 AddRegistryEntry,
+///   36 Start(IMFAsyncCallback*), 37 Stop, 38 Remove,
+///   39 GetMediaSource, 40 SendCameraProperty,
+///   41 CreateSyncEvent, 42 CreateSyncSemaphore, 43 Shutdown
 ///
 /// We QI for the classic IID first.  If that fails (E_NOINTERFACE) we fall
 /// back to the primary pointer and use the new (offset +30) slot numbers.
@@ -94,7 +94,7 @@ impl VirtualCamHandle {
             }
             Err(hr) => {
                 info!(
-                    "[vcam] QI(classic IID) failed hr={:#010x} — using new-interface offsets (34/37/39)",
+                    "[vcam] QI(classic IID) failed hr={:#010x} — using new-interface offsets (34/36/38)",
                     hr.0 as u32
                 );
                 VirtualCamHandle { raw, classic: raw, classic_separate: false, use_classic_offsets: false }
@@ -124,9 +124,8 @@ impl VirtualCamHandle {
 
     pub(super) unsafe fn start(&self) -> HRESULT {
         // Classic (IUnknown-based) vtable: slot 8   Start(IMFAttributes*)
-        // New (IMFAttributes-based) vtable: slot 37  Start(IMFAsyncCallback*)
-        //   (no AddMediaSource in new interface, so Start shifts from 38→37)
-        let slot = if self.use_classic_offsets { 8 } else { 37 };
+        // New (IMFAttributes-based) vtable: slot 36  Start(IMFAsyncCallback*)
+        let slot = if self.use_classic_offsets { 8 } else { 36 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
@@ -153,8 +152,8 @@ impl VirtualCamHandle {
     }
 
     unsafe fn remove(&self) -> HRESULT {
-        // Classic: slot 10  |  New: slot 39
-        let slot = if self.use_classic_offsets { 10 } else { 39 };
+        // Classic: slot 10  |  New: slot 38
+        let slot = if self.use_classic_offsets { 10 } else { 38 };
         let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> HRESULT =
             std::mem::transmute(*self.vtable().add(slot));
         f(self.classic)
