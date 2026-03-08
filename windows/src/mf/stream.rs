@@ -2,13 +2,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use windows::core::*;
+use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Foundation::S_OK;
 use windows::Win32::Media::MediaFoundation::*;
 
 use super::constants::{HNS_PER_SEC, OUTPUT_FPS_N};
 use super::types::{build_sample, StreamShared};
 
-#[implement(IMFMediaStream, IMFMediaEventGenerator)]
+#[implement(IMFMediaStream2, IMFMediaEventGenerator)]
 pub(super) struct AndroidCamStream {
     pub(super) shared: Arc<StreamShared>,
     pub(super) stream_desc: IMFStreamDescriptor,
@@ -100,5 +101,31 @@ impl IMFMediaStream_Impl for AndroidCamStream_Impl {
         }
 
         Ok(())
+    }
+}
+
+impl IMFMediaStream2_Impl for AndroidCamStream_Impl {
+    fn SetStreamState(&self, value: MF_STREAM_STATE) -> Result<()> {
+        let mut inner = self.shared.inner.lock().unwrap();
+        match value {
+            MF_STREAM_STATE_RUNNING => {
+                inner.stream_started = true;
+                Ok(())
+            }
+            MF_STREAM_STATE_STOPPED => {
+                inner.stream_started = false;
+                Ok(())
+            }
+            _ => Err(E_INVALIDARG.into()),
+        }
+    }
+
+    fn GetStreamState(&self) -> Result<MF_STREAM_STATE> {
+        let inner = self.shared.inner.lock().unwrap();
+        if inner.stream_started {
+            Ok(MF_STREAM_STATE_RUNNING)
+        } else {
+            Ok(MF_STREAM_STATE_STOPPED)
+        }
     }
 }

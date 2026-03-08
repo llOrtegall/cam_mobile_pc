@@ -127,25 +127,33 @@ adb version                         # only needed for USB mode
 
 Mirrors `linux/` with these differences:
 
-- **`src/virtual_cam.rs`** — Replaces `v4l2.rs`. Implements `IMFVirtualCamera` via `windows-rs 0.58`.
-  - `VirtualCamWriter::new(w, h)`: calls `MFStartup`, builds NV12 `IMFMediaType` + `IMFStreamDescriptor` + `IMFPresentationDescriptor`, creates `AndroidCamSource` (implements `IMFMediaSource`), calls `MFCreateVirtualCamera(Software, Session, CurrentUser, "AndroidCam")`, attaches source, starts camera.
-  - `write_frame(nv12)`: if a pending `RequestSample()` token exists → fires `MEMediaSample` event immediately; otherwise stores frame for next poll.
-  - `AndroidCamStream::RequestSample()`: if frame ready → delivers via `QueueEventParamUnk(MEMediaSample)`; else enqueues token.
-  - `Drop`: calls `camera.Remove()` + `MFShutdown()`.
+- **`src/mf/`** — Replaces `v4l2.rs`. MediaFoundation virtual camera split across 5 files:
+  - `mod.rs` — `VirtualCamWriter` public API: `new(w, h)` calls `MFStartup`, pre-creates stream event queue (avoids re-entrant MFPlat deadlock), builds NV12 media type + stream/presentation descriptors, constructs `AndroidCamSource`, dynamically loads `MFCreateVirtualCamera` from `mfsensorgroup.dll`, calls `add_media_source` + `start` on the raw vtable handle. `write_frame(nv12)`: if pending `RequestSample` token → fires `MEMediaSample` event; else stores frame for next poll. `Drop`: calls vtable `Remove()` + `MFShutdown()`.
+  - `camera.rs` — `VirtualCamHandle`: raw COM vtable dispatch wrapper. `MFCreateVirtualCamera` loaded via `GetProcAddress` from `mfsensorgroup.dll` (windows-rs 0.58 bindings are incorrect for this function). Vtable slots: 2=Release, 3=AddMediaSource, 4=Start, 6=Remove.
+  - `source.rs` — `AndroidCamSource` implements `IMFMediaSourceEx + IMFMediaEventGenerator`. `GetCharacteristics` returns `MFMEDIASOURCE_DOES_NOT_USE_NETWORK`. `Start()`/`Stop()` manage stream state and fire `MESourceStarted`/`MESourceStopped` events.
+  - `stream.rs` — `AndroidCamStream` implements `IMFMediaStream + IMFMediaEventGenerator`. `RequestSample()`: if a frame is ready → `QueueEventParamUnk(MEMediaSample)`; else enqueues the token for `write_frame()` to fulfil.
+  - `constants.rs` — GUID constants for `MF_DEVICESTREAM_STREAM_ID`, `MF_DEVICESTREAM_STREAM_CATEGORY`, `MF_DEVICESTREAM_FRAMESOURCE_TYPES`, `PINNAME_VIDEO_CAPTURE`, `MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE`, etc.
+  - `types.rs` — `StreamShared` (Arc'd state between VirtualCamWriter and AndroidCamStream: pending tokens deque, latest frame, event queue ref, running flag). `build_nv12_media_type()`. `build_sample()`.
 
-- **`src/ffmpeg.rs`** — Same as Linux except:
-  - Uses `VirtualCamWriter` instead of `V4l2Writer`.
-  - Converts `yuv420p → NV12` (semi-planar) before `write_frame()` via `yuv420p_to_nv12()`.
-  - `kill_pid(pid)` uses `taskkill /F /PID {pid}`.
-  - Frame-reader thread initialises COM with `CoInitializeEx(COINIT_MULTITHREADED)` via `ComInitGuard` RAII.
+- **`src/ffmpeg/`** — FFmpeg supervision split across 4 files:
+  - `mod.rs` — Re-exports `kill`, `kill_pid`, `spawn_ffmpeg`. Defines `PREVIEW_W/H/FRAME_BYTES`, `OUTPUT_W/H`.
+  - `filter.rs` — `build_vf_filter(cfg)` builds the `-vf` string.
+  - `process.rs` — `spawn_ffmpeg()`, `kill()`, `kill_pid()` (uses `taskkill /F /PID`).
+  - `reader.rs` — Frame-reader thread: initialises COM via `ComInitGuard` (from `mf` module), reads yuv420p from FFmpeg stdout → `yuv420p_to_nv12()` → `VirtualCamWriter::write_frame()` → `yuv420p_to_preview_rgb()` → `preview_tx.try_send()`.
+
+- **`src/ui/`** — UI helpers extracted from `main.rs`:
+  - `theme.rs` — `apply_theme()` applies Catppuccin Mocha visuals to an `egui::Context`.
+  - `widgets.rs` — `action_btn()` and `selectable_btn()` reusable egui widget builders.
+
+- **`src/pixel_fmt.rs`** — `yuv420p_to_nv12()` and `yuv420p_to_preview_rgb()`.
 
 - **`src/config.rs`** — No `v4l2_device` field. Config path: `%APPDATA%\campc\config.toml`.
 
-- **`src/main.rs`** — `mod virtual_cam` instead of `mod v4l2`. Rest identical.
+- **`src/main.rs`** — Adds `init_logger()` (writes to `%APPDATA%\campc\campc.log` via `simplelog`). Uses `mod mf`, `mod ffmpeg`, `mod ui`. UI split into `render_header()`, `render_controls()`, `render_preview_canvas()` methods on `CamPCApp`.
 
 - **`src/engine.rs`**, **`src/adb.rs`**, **`src/discovery.rs`** — Identical to Linux (cross-platform).
 
-- **`Cargo.toml`** — No `libc`, no `x11` eframe feature. Adds `windows = { version = "0.58", features = [Win32_Media_MediaFoundation, Win32_System_Com, Win32_Foundation] }`.
+- **`Cargo.toml`** — No `libc`, no `x11` eframe feature. Adds `windows = { version = "0.58", features = [...MediaFoundation, Com, Foundation, Com_StructuredStorage, Variant, Audio, LibraryLoader, implement] }`, `windows-core = "0.58"`, `log = "0.4"`, `simplelog = "0.12"`.
 
 ---
 
@@ -166,7 +174,15 @@ discovery thread   UDP :5001 listener; updates DiscoveredDevice on CAMPC_HELLO b
 `V4l2Writer` tries `VIDIOC_S_FMT` with `V4L2_BUF_TYPE_VIDEO_OUTPUT=2` first (v4l2loopback 0.13+ on kernel 6.x), falls back to `V4L2_BUF_TYPE_VIDEO_CAPTURE=1` for older versions. Without `exclusive_caps=1`, Zoom/Meet/Teams won't recognize the device as a real capture camera.
 
 ### Windows — IMFVirtualCamera requirements
-Requires Windows 11 22H2+ (Build 22621+). No third-party drivers needed. The virtual camera appears as "AndroidCam" in Settings → Privacy → Camera and in video conferencing app device lists.
+Requires Windows 11 22H2+ (Build 22621+) **and Developer Mode enabled** (Settings → System → For developers). No third-party drivers needed. The virtual camera appears as "AndroidCam" in Settings → Privacy → Camera and in video conferencing app device lists.
+
+`MFCreateVirtualCamera` is loaded at runtime via `GetProcAddress` from `mfsensorgroup.dll` because the windows-rs 0.58 static bindings for this function are incorrect (wrong signature). The `sourceId` parameter must be a non-null GUID string — passing `null` produces `E_INVALIDARG (0x80070057)`.
+
+### Windows — File logging
+`init_logger()` in `main.rs` writes to `%APPDATA%\campc\campc.log` (overwritten each run) using `simplelog`. All modules use `log::info!/warn!/error!` macros. Check this file first when diagnosing failures.
+
+### Windows — Stream event queue pre-creation
+`StreamShared::new()` creates the `IMFMediaEventQueue` **before** `IMFVirtualCamera::Start()` is called. Creating it inside `AndroidCamSource::Start()` would re-enter mfplat while the virtual camera holds an internal lock, causing an access violation in `mfplat.dll`.
 
 ### Windows — NV12 pixel format
 `IMFVirtualCamera` expects NV12 (semi-planar). FFmpeg outputs yuv420p (planar). `yuv420p_to_nv12()` in `ffmpeg.rs` interleaves the U and V planes: Y plane is copied as-is; UV plane pairs each U byte with the corresponding V byte.
@@ -189,7 +205,7 @@ Re-run `setup_ubuntu.sh` — it rebuilds and reinstalls `v4l2loopback` for the n
 
 | Component | Linux | Windows |
 |---|---|---|
-| Virtual camera | `/dev/video10` via ioctl (v4l2.rs) | `IMFVirtualCamera` COM (virtual_cam.rs) |
+| Virtual camera | `/dev/video10` via ioctl (v4l2.rs) | `IMFVirtualCamera` COM (mf/ module) |
 | Pixel format written | YUV420P planar | NV12 semi-planar |
 | Kill process | `kill {pid}` | `taskkill /F /PID {pid}` |
 | Config path | `~/.config/campc/config.toml` | `%APPDATA%\campc\config.toml` |

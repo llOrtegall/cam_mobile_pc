@@ -3,24 +3,33 @@ use windows::core::GUID;
 pub(super) const OUTPUT_FPS_N: u32 = 30;
 pub(super) const OUTPUT_FPS_D: u32 = 1;
 pub(super) const HNS_PER_SEC: i64 = 10_000_000;
+pub(super) const ANDROID_CAM_FRIENDLY_NAME: &str = "AndroidCam";
 
 // Stable source id so the same virtual camera is re-opened across calls.
+// Also used as the COM CLSID for CoRegisterClassObject on the new interface.
 pub(super) const ANDROID_CAM_SOURCE_ID: &str = "{5B9A4C2D-8E1F-4A3B-9C7D-0F2E1A5B6C4D}\0";
 
-// MF_DEVICESTREAM_STREAM_ID {11CA3D03-4A3B-4CF3-8938-8A8E0F0F0A56}
-pub(super) const MF_DEVICESTREAM_STREAM_ID_ATTR: GUID = GUID {
-    data1: 0x11CA3D03,
-    data2: 0x4A3B,
-    data3: 0x4CF3,
-    data4: [0x89, 0x38, 0x8A, 0x8E, 0x0F, 0x0F, 0x0A, 0x56],
+pub(super) const ANDROID_CAM_SOURCE_CLSID: GUID = GUID {
+    data1: 0x5B9A4C2D,
+    data2: 0x8E1F,
+    data3: 0x4A3B,
+    data4: [0x9C, 0x7D, 0x0F, 0x2E, 0x1A, 0x5B, 0x6C, 0x4D],
 };
 
-// MF_DEVICESTREAM_STREAM_CATEGORY {149C20AC-2B6C-4C2B-8B37-3E47B88DA38B}
+// MF_DEVICESTREAM_STREAM_ID {11BD5120-D124-446B-88E6-17060257FFF9}
+pub(super) const MF_DEVICESTREAM_STREAM_ID_ATTR: GUID = GUID {
+    data1: 0x11BD5120,
+    data2: 0xD124,
+    data3: 0x446B,
+    data4: [0x88, 0xE6, 0x17, 0x06, 0x02, 0x57, 0xFF, 0xF9],
+};
+
+// MF_DEVICESTREAM_STREAM_CATEGORY {2939E7B8-A62E-4579-B674-D4073DFABBBA}
 pub(super) const MF_DEVICESTREAM_STREAM_CATEGORY_ATTR: GUID = GUID {
-    data1: 0x149C20AC,
-    data2: 0x2B6C,
-    data3: 0x4C2B,
-    data4: [0x8B, 0x37, 0x3E, 0x47, 0xB8, 0x8D, 0xA3, 0x8B],
+    data1: 0x2939E7B8,
+    data2: 0xA62E,
+    data3: 0x4579,
+    data4: [0xB6, 0x74, 0xD4, 0x07, 0x3D, 0xFA, 0xBB, 0xBA],
 };
 
 // PINNAME_VIDEO_CAPTURE {FB6C4281-0353-11D1-905F-0000C0CC16BA}
@@ -41,12 +50,70 @@ pub(super) const MF_DEVICESTREAM_FRAMESOURCE_TYPES_ATTR: GUID = GUID {
 
 pub(super) const MF_FRAMESOURCE_TYPES_COLOR: u32 = 0x0001;
 
-// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE {C60AC5FE-252A-478F-A0EF-BC8FA401F3CF}
+// MF_DEVICESTREAM_FRAMESERVER_SHARED {1CB378E9-B279-41D4-AF97-34A243E68320}
+pub(super) const MF_DEVICESTREAM_FRAMESERVER_SHARED_ATTR: GUID = GUID {
+    data1: 0x1CB378E9,
+    data2: 0xB279,
+    data3: 0x41D4,
+    data4: [0xAF, 0x97, 0x34, 0xA2, 0x43, 0xE6, 0x83, 0x20],
+};
+
+pub(super) const DEVPROP_TYPE_INT32: u32 = 0x00000006;
+pub(super) const DEVPROP_TYPE_STRING: u32 = 0x00000012;
+
+#[repr(C)]
+pub(super) struct DevPropKey {
+    pub fmtid: GUID,
+    pub pid: u32,
+}
+
+// Custom DEVPKEYs from Microsoft's virtual camera sample.
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_SOURCEID: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 4,
+};
+
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_FRIENDLYNAME: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 5,
+};
+
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_LIFETIME: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 6,
+};
+
+pub(super) const DEVPKEY_DEVICEINTERFACE_VCAMCREATE_ACCESS: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        data1: 0x6AC1FBF7,
+        data2: 0x45F7,
+        data3: 0x4E06,
+        data4: [0xBD, 0xA7, 0xF8, 0x17, 0xEB, 0xFA, 0x04, 0xD1],
+    },
+    pid: 7,
+};
+
+// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE {C60AC5FE-252A-478F-A0EF-BC8FA5F7CAD3}
 pub(super) const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE: GUID = GUID {
     data1: 0xC60AC5FE,
     data2: 0x252A,
     data3: 0x478F,
-    data4: [0xA0, 0xEF, 0xBC, 0x8F, 0xA4, 0x01, 0xF3, 0xCF],
+    data4: [0xA0, 0xEF, 0xBC, 0x8F, 0xA5, 0xF7, 0xCA, 0xD3],
 };
 
 // MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID {8AC3587A-4AE7-42D8-99E0-0A6013EEF90F}
@@ -55,4 +122,28 @@ pub(super) const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID: GUID = GUID {
     data2: 0x4AE7,
     data3: 0x42D8,
     data4: [0x99, 0xE0, 0x0A, 0x60, 0x13, 0xEE, 0xF9, 0x0F],
+};
+
+// MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME {60D0E559-52F8-4FA2-BBCE-ACDB34A8EC01}
+pub(super) const MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME: GUID = GUID {
+    data1: 0x60D0E559,
+    data2: 0x52F8,
+    data3: 0x4FA2,
+    data4: [0xBB, 0xCE, 0xAC, 0xDB, 0x34, 0xA8, 0xEC, 0x01],
+};
+
+// MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY {77F0AE69-C3BD-4509-941D-467E4D24899E}
+pub(super) const MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY: GUID = GUID {
+    data1: 0x77F0AE69,
+    data2: 0xC3BD,
+    data3: 0x4509,
+    data4: [0x94, 0x1D, 0x46, 0x7E, 0x4D, 0x24, 0x89, 0x9E],
+};
+
+// KSCATEGORY_VIDEO_CAMERA {E5323777-F976-4F5B-9B55-B94699C46E44}
+pub(super) const KSCATEGORY_VIDEO_CAMERA: GUID = GUID {
+    data1: 0xE5323777,
+    data2: 0xF976,
+    data3: 0x4F5B,
+    data4: [0x9B, 0x55, 0xB9, 0x46, 0x99, 0xC4, 0x6E, 0x44],
 };
