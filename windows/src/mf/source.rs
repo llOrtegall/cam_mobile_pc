@@ -7,7 +7,11 @@ use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, S_OK};
 use windows::Win32::Media::MediaFoundation::*;
 
 use super::constants::{
+    ANDROID_CAM_FRIENDLY_NAME,
+    KSCATEGORY_VIDEO_CAMERA,
+    MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
 };
 use super::stream::AndroidCamStream;
@@ -68,11 +72,19 @@ impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
         info!("[vcam] GetSourceAttributes() called");
         let mut attrs: Option<IMFAttributes> = None;
         unsafe {
-            MFCreateAttributes(&mut attrs, 1)?;
+            MFCreateAttributes(&mut attrs, 3)?;
             let a = attrs.as_ref().ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
             a.SetGUID(
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )?;
+            a.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
+                &KSCATEGORY_VIDEO_CAMERA,
+            )?;
+            a.SetString(
+                &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                &windows::core::HSTRING::from(ANDROID_CAM_FRIENDLY_NAME),
             )?;
         }
         attrs.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
