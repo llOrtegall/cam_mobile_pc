@@ -13,7 +13,7 @@ use super::constants::{
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
 };
-use super::source::AndroidCamSource;
+use super::source::{build_source_attributes, AndroidCamSource};
 use super::types::StreamShared;
 
 /// IMFActivate wrapper returned by IClassFactory::CreateInstance.
@@ -265,10 +265,12 @@ impl IMFActivate_Impl for AndroidCamActivate_Impl {
         let mut lock = self.active_source.lock().unwrap();
         if lock.is_none() {
             let event_queue: IMFMediaEventQueue = unsafe { MFCreateEventQueue()? };
+            let source_attrs = unsafe { build_source_attributes(Some(&self.attrs))? };
             let source_obj = AndroidCamSource {
                 shared: Arc::clone(&self.shared),
                 presentation_desc: self.presentation_desc.clone(),
                 stream_desc: self.stream_desc.clone(),
+                source_attrs,
                 event_queue,
                 stream: Mutex::new(None),
             };

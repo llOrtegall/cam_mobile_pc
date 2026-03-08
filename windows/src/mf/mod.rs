@@ -42,7 +42,7 @@ use self::constants::{
     OUTPUT_FPS_N,
     PINNAME_VIDEO_CAPTURE,
 };
-use self::source::AndroidCamSource;
+use self::source::{build_source_attributes, AndroidCamSource};
 use self::types::{build_nv12_media_type, build_sample, StreamShared};
 
 pub(crate) struct ComInitGuard;
@@ -122,11 +122,13 @@ impl VirtualCamWriter {
 
         info!("[vcam] step 8: build AndroidCamSource");
         let source_eq: IMFMediaEventQueue = MFCreateEventQueue()?;
+        let source_attrs = build_source_attributes(None)?;
         // Clone descriptors so the factory can also use them (classic path moves them).
         let source_obj = AndroidCamSource {
             shared: Arc::clone(&shared),
             presentation_desc: presentation_desc.clone(),
             stream_desc: stream_desc.clone(),
+            source_attrs,
             event_queue: source_eq,
             stream: Mutex::new(None),
         };

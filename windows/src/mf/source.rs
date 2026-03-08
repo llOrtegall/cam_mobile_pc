@@ -22,8 +22,34 @@ pub(super) struct AndroidCamSource {
     pub(super) shared: Arc<StreamShared>,
     pub(super) presentation_desc: IMFPresentationDescriptor,
     pub(super) stream_desc: IMFStreamDescriptor,
+    pub(super) source_attrs: IMFAttributes,
     pub(super) event_queue: IMFMediaEventQueue,
     pub(super) stream: Mutex<Option<IMFMediaStream>>,
+}
+
+pub(super) unsafe fn build_source_attributes(seed: Option<&IMFAttributes>) -> Result<IMFAttributes> {
+    let mut attrs: Option<IMFAttributes> = None;
+    MFCreateAttributes(&mut attrs, 8)?;
+    let attrs = attrs.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+    if let Some(seed) = seed {
+        seed.CopyAllItems(&attrs)?;
+    }
+
+    attrs.SetGUID(
+        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+    )?;
+    attrs.SetGUID(
+        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
+        &KSCATEGORY_VIDEO_CAMERA,
+    )?;
+    attrs.SetString(
+        &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+        &windows::core::HSTRING::from(ANDROID_CAM_FRIENDLY_NAME),
+    )?;
+
+    Ok(attrs)
 }
 
 impl IMFMediaEventGenerator_Impl for AndroidCamSource_Impl {
@@ -70,24 +96,7 @@ impl IMFMediaSourceEx_Impl for AndroidCamSource_Impl {
 
     fn GetSourceAttributes(&self) -> Result<IMFAttributes> {
         info!("[vcam] GetSourceAttributes() called");
-        let mut attrs: Option<IMFAttributes> = None;
-        unsafe {
-            MFCreateAttributes(&mut attrs, 3)?;
-            let a = attrs.as_ref().ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
-            a.SetGUID(
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-            )?;
-            a.SetGUID(
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
-                &KSCATEGORY_VIDEO_CAMERA,
-            )?;
-            a.SetString(
-                &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                &windows::core::HSTRING::from(ANDROID_CAM_FRIENDLY_NAME),
-            )?;
-        }
-        attrs.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+        Ok(self.source_attrs.clone())
     }
 
     fn SetD3DManager(&self, _pmanager: Option<&IUnknown>) -> Result<()> {

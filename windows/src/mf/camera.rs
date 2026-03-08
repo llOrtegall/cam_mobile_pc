@@ -129,8 +129,8 @@ impl VirtualCamHandle {
 
     pub(super) unsafe fn start(&self) -> HRESULT {
         // Classic (IUnknown-based) vtable: slot 8   Start(IMFAttributes*)
-        // New (IMFAttributes-based) vtable: slot 38  Start(IMFAsyncCallback*)
-        let slot = if self.use_classic_offsets { 8 } else { 38 };
+        // New (IMFAttributes-based) vtable: slot 36  Start(IMFAsyncCallback*)
+        let slot = if self.use_classic_offsets { 8 } else { 36 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
@@ -157,8 +157,8 @@ impl VirtualCamHandle {
     }
 
     unsafe fn remove(&self) -> HRESULT {
-        // Classic: slot 10  |  New: slot 40
-        let slot = if self.use_classic_offsets { 10 } else { 40 };
+        // Classic: slot 10  |  New: slot 38
+        let slot = if self.use_classic_offsets { 10 } else { 38 };
         let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> HRESULT =
             std::mem::transmute(*self.vtable().add(slot));
         f(self.classic)
