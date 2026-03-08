@@ -30,20 +30,31 @@ const IID_CLASSIC_IMF_VIRTUAL_CAMERA: GUID = GUID {
 
 /// Wraps the raw COM pointer(s) returned by MFCreateVirtualCamera.
 ///
-/// `MFCreateVirtualCamera` may return an object whose primary vtable inherits from
-/// IMFAttributes (the windows-rs 0.58 interface, IID 1c08a864…).  That interface has no
-/// AddMediaSource.  We call QueryInterface for the classic IID (a831c8e9…) to get a
-/// separate interface pointer whose vtable starts immediately after IUnknown, placing
-/// AddMediaSource at slot 7.
+/// Two IMFVirtualCamera vtable layouts exist on Windows 11:
+///
+/// Classic (IID a831c8e9, inherits IUnknown only) — vtable slots:
+///   0-2  IUnknown, 3 AddStreamConfig, 4 AddProperty, 5 AddRegistryEntry,
+///   6 AddDeviceSourceInfo, 7 AddMediaSource, 8 Start(IMFAttributes*),
+///   9 Stop, 10 Remove, 11 GetMediaSource
+///
+/// New (IID 1c08a864, inherits IMFAttributes — 30 extra slots) — vtable slots:
+///   0-2  IUnknown, 3-32 IMFAttributes (30 methods),
+///   33 AddStreamConfig, 34 AddProperty, 35 AddRegistryEntry,
+///   36 AddDeviceSourceInfo, 37 AddMediaSource, 38 Start(IMFAsyncCallback*),
+///   39 Stop, 40 Remove, 41 GetMediaSource
+///
+/// We QI for the classic IID first.  If that fails (E_NOINTERFACE) we fall
+/// back to the primary pointer and use the new (offset +30) slot numbers.
 pub(super) struct VirtualCamHandle {
     /// Primary pointer returned by MFCreateVirtualCamera.
     raw: *mut std::ffi::c_void,
-    /// Pointer to the classic IMFVirtualCamera interface.
-    /// May equal `raw` if QI returned the same pointer, or be a separate pointer if the
-    /// object exposes both interfaces.
+    /// Pointer used for vtable dispatch (classic IID ptr, or == raw if QI failed).
     classic: *mut std::ffi::c_void,
     /// True if `classic` is a different pointer from `raw` and needs its own Release().
     classic_separate: bool,
+    /// True  → use classic offsets (AddMediaSource=7, Start=8, Remove=10).
+    /// False → use new-interface offsets (AddMediaSource=37, Start=38, Remove=40).
+    use_classic_offsets: bool,
 }
 
 unsafe impl Send for VirtualCamHandle {}
@@ -71,19 +82,19 @@ impl VirtualCamHandle {
     pub(super) unsafe fn new(raw: *mut std::ffi::c_void) -> Self {
         match query_interface(raw, &IID_CLASSIC_IMF_VIRTUAL_CAMERA) {
             Ok(classic) if classic != raw => {
-                info!("[vcam] QI(classic IID) → separate interface ptr");
-                VirtualCamHandle { raw, classic, classic_separate: true }
+                info!("[vcam] QI(classic IID) → separate ptr, using classic offsets (7/8/10)");
+                VirtualCamHandle { raw, classic, classic_separate: true, use_classic_offsets: true }
             }
             Ok(classic) => {
-                info!("[vcam] QI(classic IID) → same ptr (object IS the classic interface)");
-                VirtualCamHandle { raw, classic, classic_separate: false }
+                info!("[vcam] QI(classic IID) → same ptr, using classic offsets (7/8/10)");
+                VirtualCamHandle { raw, classic, classic_separate: false, use_classic_offsets: true }
             }
             Err(hr) => {
                 info!(
-                    "[vcam] QI(classic IID) failed hr={:#010x} — using primary ptr at slot 7",
+                    "[vcam] QI(classic IID) failed hr={:#010x} — using new-interface offsets (37/38/40)",
                     hr.0 as u32
                 );
-                VirtualCamHandle { raw, classic: raw, classic_separate: false }
+                VirtualCamHandle { raw, classic: raw, classic_separate: false, use_classic_offsets: false }
             }
         }
     }
@@ -97,28 +108,32 @@ impl VirtualCamHandle {
         &self,
         source_unk: *mut std::ffi::c_void,
     ) -> HRESULT {
-        // Slot 7 on the classic IMFVirtualCamera (IUnknown-based) vtable.
+        // Classic (IUnknown-based) vtable: slot 7
+        // New (IMFAttributes-based) vtable: slot 37  (3 IUnknown + 30 IMFAttributes + 4 own)
+        let slot = if self.use_classic_offsets { 7 } else { 37 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
-        ) -> HRESULT = std::mem::transmute(*self.vtable().add(7));
+        ) -> HRESULT = std::mem::transmute(*self.vtable().add(slot));
         f(self.classic, source_unk, std::ptr::null_mut())
     }
 
     pub(super) unsafe fn start(&self) -> HRESULT {
-        // Slot 8 on the classic vtable.
+        // Classic: slot 8  |  New: slot 38
+        let slot = if self.use_classic_offsets { 8 } else { 38 };
         let f: unsafe extern "system" fn(
             *mut std::ffi::c_void,
             *mut std::ffi::c_void,
-        ) -> HRESULT = std::mem::transmute(*self.vtable().add(8));
+        ) -> HRESULT = std::mem::transmute(*self.vtable().add(slot));
         f(self.classic, std::ptr::null_mut())
     }
 
     unsafe fn remove(&self) -> HRESULT {
-        // Slot 10 on the classic vtable.
+        // Classic: slot 10  |  New: slot 40
+        let slot = if self.use_classic_offsets { 10 } else { 40 };
         let f: unsafe extern "system" fn(*mut std::ffi::c_void) -> HRESULT =
-            std::mem::transmute(*self.vtable().add(10));
+            std::mem::transmute(*self.vtable().add(slot));
         f(self.classic)
     }
 
