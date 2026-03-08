@@ -3,6 +3,7 @@
 //! Keeps COM-heavy implementation behind a small API so the frame reader only
 //! depends on `VirtualCamWriter::new` and `write_frame`.
 
+mod activate;
 mod camera;
 mod constants;
 mod factory;
